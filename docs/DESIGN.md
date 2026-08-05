@@ -128,10 +128,14 @@ under it.
 - **x limits** come from `quant.k_choices` in closed form — the reachable bpw
   interval is known before a single evaluation runs, so the box never depends
   on what the search happened to sample.
-- **y limits** are anchored to the fp16 perplexity, capped at
-  `plot.ylim_headroom ×` it (default 12). Anchoring to the *worst* reference
-  instead hands the whole axis to one blown-up low-K baseline and squashes
-  everything worth seeing into a sliver.
+- **y limits**: the ceiling is **uncapped by default** (`plot.ylim_max_ratio:
+  null`) — it opens to the highest reference point, and `refit_at_end` raises
+  it further to cover every candidate, so nothing is ever drawn off-scale. Set
+  a number to cap at that multiple of the fp16 perplexity instead; the excess
+  is then excluded and counted. The floor is `plot.ylim_min` when set (1.0 is
+  the theoretical minimum), otherwise `ylim_min_ratio ×` the lowest reference.
+  Both ends are opened by `plot.ylim_pad`, measured in decades on a log axis,
+  so extreme points do not sit on the spines.
 - Points outside the box are **clipped and counted** in a corner annotation,
   never silently dropped.
 
@@ -152,7 +156,7 @@ To open up room at the bottom, in increasing order of bluntness:
 
 | Want | Setting |
 |---|---|
-| A little more space under fp16 | `plot.ylim_floor_ratio: 0.7` (default 0.9) |
+| A little more space under fp16 | `plot.ylim_min_ratio: 0.7` (default 0.9) |
 | The true theoretical floor | `plot.ylim: [1.0, <top>]` |
 | An axis that really starts at 0 | `plot.yscale: linear` + `plot.ylim: [0, <top>]` |
 

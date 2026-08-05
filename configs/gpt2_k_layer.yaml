@@ -121,13 +121,24 @@ plot:
   dpi: 150
   style: paper
   yscale: log
-  # y floor = ylim_floor_ratio x fp16 perplexity. 0.8 leaves more room under
+  # y floor = ylim_min_ratio x fp16 perplexity. 0.8 leaves more room under
   # the fp16 line than the 0.9 default, so a candidate that ties or edges past
   # the uncompressed model is clearly separated from it rather than hugging
   # the axis.
-  ylim_floor_ratio: 0.8
-  ylim_headroom: 12.0
+  # Absolute floor: 1.0 is the theoretical minimum, since perplexity is
+  # exp(cross-entropy) and cross-entropy is non-negative. Overrides
+  # ylim_min_ratio, is not padded, and refit never moves it.
+  ylim_min: 1.0
+  ylim_min_ratio: 0.8      # unused while ylim_min is set
+  ylim_pad: 0.03            # breathing room at both ends, in decades
+  # Ceiling, mirroring the floor. null = no cap: the box opens to the highest
+  # reference point and refit_at_end raises it to cover every candidate, so
+  # nothing is ever off-scale. ylim_max sets an absolute value instead;
+  # ylim_max_ratio caps at that multiple of fp16.
+  ylim_max: null
+  ylim_max_ratio: null
   legend_alpha: 0.3
+  marker_pt: 3.5             # front/baseline marker diameter (pt)
   baseline_label: exponential search (baseline)
   annotation_pt: null        # null -> base font - 3 (5pt at the ieee preset)
   venue: ieee                # 3.5 in column figures, Times

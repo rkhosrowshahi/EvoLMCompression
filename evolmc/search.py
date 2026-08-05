@@ -212,10 +212,11 @@ def run_search(problem, cfg, run, resume_from: str | None = None):
     problem.restore()
     _checkpoint(algorithm, run, len(records), latest_only=True)
 
-    if plotter and cfg.plot.refit_at_end and not cfg.plot.ylim:
-        new_ylim = _refit_floor(records, history, ylim, cfg)
+    if plotter and cfg.plot.refit_at_end:
+        new_ylim = _refit_box(records, history, ylim, cfg)
         if new_ylim is not None:
-            run.log(f"refitting y floor {ylim[0]:.2f} -> {new_ylim[0]:.2f} "
+            run.log(f"refitting y box [{ylim[0]:,.2f}, {ylim[1]:,.2f}] -> "
+                    f"[{new_ylim[0]:,.2f}, {new_ylim[1]:,.2f}] "
                     f"and re-rendering {len(records)} frames")
             ylim = new_ylim
             with open(run.file("data", "plot_box.json"), "w") as f:
@@ -277,8 +278,8 @@ def _log_hv_reference(run, hv, fp16, baselines, cfg):
 
     if fp16 and np.isfinite(fp16):
         run.log(f"  derived from: fp16 ppl {fp16:,.2f} "
-                f"x {cfg.plot.ylim_floor_ratio:g} (floor) "
-                f"and x {cfg.plot.ylim_headroom:g} (ceiling)")
+                f"x {cfg.plot.ylim_min_ratio:g} (floor) "
+                f"and x {cfg.plot.ylim_max_ratio:g} (ceiling)")
     if baselines:
         lo = min(baselines, key=lambda b: b[0])
         hi = max(baselines, key=lambda b: b[0])
@@ -293,12 +294,15 @@ def _log_hv_reference(run, hv, fp16, baselines, cfg):
             "this box")
 
 
-def _refit_floor(records, history, ylim, cfg):
-    """A lower y floor if anything was evaluated below the current one.
+def _refit_box(records, history, ylim, cfg):
+    """Reopen the y box so nothing evaluated sits outside it.
 
-    Returns None when the box already contains every observed point, which is
-    the normal case on real data -- no PTQ candidate beats the fp16 model by
-    enough to fall through a 10% margin.
+    The floor is always reopened when a candidate beat it -- otherwise those
+    points get clipped onto the spine instead of excluded. The ceiling is only
+    reopened when `ylim_max_ratio` is null, because a finite headroom is an
+    explicit instruction to cap the axis and count the rest as off-scale.
+
+    Returns None when the box already contains everything.
     """
     seen = [np.array(r["front"], dtype=float)[:, 0] for r in records]
     seen += [h["F"][:, 0] for h in history]
@@ -306,10 +310,19 @@ def _refit_floor(records, history, ylim, cfg):
         return None
     vals = np.concatenate(seen)
     vals = vals[np.isfinite(vals) & (vals > 0)]
-    if not len(vals) or float(vals.min()) >= ylim[0]:
+    if not len(vals):
         return None
-    # Perplexity cannot go below 1.0, so never open the axis past it.
-    return (max(float(vals.min()) * cfg.plot.ylim_floor_ratio, 1.0), ylim[1])
+
+    lo, hi = ylim
+    # Perplexity cannot go below 1.0, so never open the axis past it. An
+    # explicitly configured floor is left exactly where it was asked for.
+    if cfg.plot.ylim_min is None and float(vals.min()) < lo:
+        lo = max(float(vals.min()) * cfg.plot.ylim_min_ratio, 1.0)
+    if (cfg.plot.ylim_max is None
+            and cfg.plot.ylim_max_ratio is None
+            and float(vals.max()) > hi):
+        hi = float(vals.max()) * 1.05
+    return None if (lo, hi) == tuple(ylim) else (lo, hi)
 
 
 def _checkpoint(algorithm, run, gen, latest_only=False):

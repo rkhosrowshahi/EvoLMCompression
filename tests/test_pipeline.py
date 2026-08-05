@@ -297,7 +297,7 @@ def test_perplexity_floor_of_zero_is_rejected_on_log_axis():
         _check_ylim((100.0, 1.0), "log")
 
 
-def test_ylim_floor_ratio_lowers_the_box():
+def test_ylim_min_ratio_lowers_the_box():
     from evolmc.plotting import derive_limits
 
     class FakeCost:
@@ -312,9 +312,10 @@ def test_ylim_floor_ratio_lowers_the_box():
         def cost_only(self, k): return FakeCost(2.0 if k == 4 else 4.0)
 
     cfg = Config()
-    cfg.plot.ylim_headroom = 10.0
+    cfg.plot.ylim_max_ratio = 10.0
+    cfg.plot.ylim_pad = 0.0        # isolate the ratio from the padding
     _, tight = derive_limits(FakeComp(), cfg, baselines=[30.0, 50.0], fp16_ppl=25.0)
-    cfg.plot.ylim_floor_ratio = 0.5
+    cfg.plot.ylim_min_ratio = 0.5
     _, loose = derive_limits(FakeComp(), cfg, baselines=[30.0, 50.0], fp16_ppl=25.0)
 
     assert tight[0] == pytest.approx(25.0 * 0.9)

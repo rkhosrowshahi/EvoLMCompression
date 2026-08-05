@@ -216,40 +216,40 @@ def test_refit_lowers_the_floor_when_candidates_beat_the_references():
     matplotlib clips it onto the spine instead of excluding it. The end-of-run
     refit reopens the floor and every frame is re-rendered in the new box.
     """
-    from evolmc.search import _refit_floor
+    from evolmc.search import _refit_box
 
     cfg = Config()
     records = [{"front": [[140.0, 2.0], [300.0, 3.0]]}]
     history = [{"F": np.array([[140.0, 2.0], [900.0, 4.0]])}]
 
     # Floor already below everything observed -> no refit.
-    assert _refit_floor(records, history, (100.0, 5000.0), cfg) is None
+    assert _refit_box(records, history, (100.0, 5000.0), cfg) is None
 
     # Something was evaluated below the floor -> reopen it.
-    new = _refit_floor(records, history, (150.0, 5000.0), cfg)
+    new = _refit_box(records, history, (150.0, 5000.0), cfg)
     assert new is not None
-    assert new[0] == pytest.approx(140.0 * cfg.plot.ylim_floor_ratio)
+    assert new[0] == pytest.approx(140.0 * cfg.plot.ylim_min_ratio)
     assert new[1] == 5000.0  # the ceiling is untouched
 
 
 def test_refit_never_opens_below_the_perplexity_bound():
     """PPL >= 1 always, so the floor must never go under 1.0."""
-    from evolmc.search import _refit_floor
+    from evolmc.search import _refit_box
 
     cfg = Config()
     records = [{"front": [[1.02, 2.0]]}]
-    new = _refit_floor(records, [], (10.0, 100.0), cfg)
+    new = _refit_box(records, [], (10.0, 100.0), cfg)
     assert new[0] == 1.0  # 1.02 * 0.9 = 0.918 would be unreachable
 
 
 def test_refit_ignores_non_finite_objectives():
-    from evolmc.search import _refit_floor
+    from evolmc.search import _refit_box
 
     cfg = Config()
     records = [{"front": [[float("inf"), 2.0], [200.0, 3.0]]}]
     history = [{"F": np.array([[np.nan, 2.0], [180.0, 3.0]])}]
-    new = _refit_floor(records, history, (500.0, 5000.0), cfg)
-    assert new[0] == pytest.approx(180.0 * cfg.plot.ylim_floor_ratio)
+    new = _refit_box(records, history, (500.0, 5000.0), cfg)
+    assert new[0] == pytest.approx(180.0 * cfg.plot.ylim_min_ratio)
 
 
 def test_convergence_figure_is_square(tmp_path):
@@ -465,3 +465,353 @@ def test_correlation_plot_ignores_non_finite_points(tmp_path):
     paths = plot_proxy_correlation(str(tmp_path / "c"), cfg, calib, evald,
                                    rho=0.9)
     assert os.path.exists(paths[0])
+
+
+def test_uncapped_headroom_puts_every_reference_inside_the_box():
+    """ylim_max_ratio: null means no cap -- nothing is off-scale."""
+    from evolmc.plotting import derive_limits
+
+    class FakeCost:
+        def __init__(self, b): self.bpw_target = self.bpw_model = b
+
+    class FakeGenome:
+        k_choices = (2, 8192)
+        def encode_uniform(self, k): return k
+
+    class FakeComp:
+        genome = FakeGenome()
+        def cost_only(self, k): return FakeCost(1.0 if k == 2 else 13.0)
+
+    baselines = [17884.0, 1.045e8, 615.9, 58.7, 27.7]   # the real GPT-2 spread
+    cfg = Config()
+    cfg.plot.ylim_pad = 0.0        # padding is exercised separately below
+
+    cfg.plot.ylim_max_ratio = 12.0
+    _, capped = derive_limits(FakeComp(), cfg, baselines, fp16_ppl=27.675)
+    assert capped[1] == pytest.approx(27.675 * 12)
+    assert sum(b > capped[1] for b in baselines) == 3   # three off-scale
+
+    cfg.plot.ylim_max_ratio = None
+    _, full = derive_limits(FakeComp(), cfg, baselines, fp16_ppl=27.675)
+    assert full[1] == pytest.approx(1.045e8)
+    assert all(full[0] <= b <= full[1] for b in baselines)   # nothing off-scale
+
+
+def test_refit_raises_the_ceiling_only_when_headroom_is_uncapped():
+    from evolmc.search import _refit_box
+
+    cfg = Config()
+    records = [{"front": [[5000.0, 2.0], [30.0, 8.0]]}]
+    history = [{"F": np.array([[9e6, 2.0], [30.0, 8.0]])}]
+
+    # A finite headroom is an explicit "cap here": nothing moves, so the refit
+    # reports no change and the excess stays counted as off-scale.
+    cfg.plot.ylim_max_ratio = 12.0
+    assert _refit_box(records, history, (22.0, 332.0), cfg) is None
+
+    # Uncapped: the ceiling opens to cover the worst candidate evaluated.
+    cfg.plot.ylim_max_ratio = None
+    lo, hi = _refit_box(records, history, (22.0, 332.0), cfg)
+    assert hi == pytest.approx(9e6 * 1.05)
+    assert lo == 22.0          # floor untouched, nothing fell below it
+
+
+def test_refit_returns_none_when_the_box_already_fits():
+    from evolmc.search import _refit_box
+
+    cfg = Config()
+    cfg.plot.ylim_max_ratio = None
+    records = [{"front": [[100.0, 2.0], [30.0, 8.0]]}]
+    assert _refit_box(records, [], (20.0, 500.0), cfg) is None
+
+
+def test_baseline_tags_do_not_overprint_each_other(tmp_path):
+    """Points bunch where the curve flattens; overlapping tags are worse than
+    absent ones, since the curve still shows the points are there."""
+    cfg = _cfg("ieee", "column")
+    # Ten references crowded into the right-hand third of the axis.
+    crowded = [(8.0 + 0.5 * i, 30.0, 2 ** (9 + i)) for i in range(10)]
+    plotter = ParetoPlotter(_Run(str(tmp_path)), cfg, (0.4, 13.7), (22.0, 1e8),
+                            27.7, crowded)
+    captured = {}
+    original = plotter._finish
+
+    def spy(ax, *a, **k):
+        original(ax, *a, **k)
+        captured["tags"] = [t.get_text() for t in ax.texts
+                            if t.get_text().startswith("$K$=")]
+
+    plotter._finish = spy
+    F = np.array([[1e6, 2.0], [30.0, 8.0]])
+    plotter.frame(1, F, F, 10, 0.5)
+
+    # Spaced 0.5 bpw apart in a 13.3-wide box = 0.038 of the axis, below the
+    # 0.075 minimum gap, so roughly every other one survives.
+    assert 0 < len(captured["tags"]) < len(crowded)
+
+
+def test_well_spaced_baseline_tags_are_all_kept(tmp_path):
+    cfg = _cfg("ieee", "column")
+    spaced = [(2.0, 500.0, 4), (6.0, 90.0, 64), (11.0, 30.0, 2048)]
+    plotter = ParetoPlotter(_Run(str(tmp_path)), cfg, (0.4, 13.7), (22.0, 1e4),
+                            27.7, spaced)
+    captured = {}
+    original = plotter._finish
+
+    def spy(ax, *a, **k):
+        original(ax, *a, **k)
+        captured["tags"] = [t.get_text() for t in ax.texts
+                            if t.get_text().startswith("$K$=")]
+
+    plotter._finish = spy
+    F = np.array([[500.0, 2.0], [30.0, 11.0]])
+    plotter.frame(1, F, F, 10, 0.5)
+    assert len(captured["tags"]) == 3
+
+
+def test_ylim_padding_opens_both_ends_evenly_in_log_space():
+    """Extreme points must not sit exactly on the spines and read as clipped."""
+    from evolmc.plotting import pad_ylim
+
+    lo, hi = pad_ylim((10.0, 1e7), "log", 0.03)
+    decades = np.log10(1e7) - np.log10(10.0)          # 6
+    assert lo == pytest.approx(10.0 / 10 ** (0.03 * decades))
+    assert hi == pytest.approx(1e7 * 10 ** (0.03 * decades))
+    # Multiplicative, so the pad looks the same at both ends of a wide axis.
+    assert np.log10(10.0 / lo) == pytest.approx(np.log10(hi / 1e7))
+
+    # Never opens below the perplexity bound of 1.0.
+    assert pad_ylim((1.05, 100.0), "log", 0.5)[0] == 1.0
+    # Linear axes pad additively.
+    assert pad_ylim((0.0, 100.0), "linear", 0.1) == (-10.0, 110.0)
+    # A zero or degenerate span is a no-op.
+    assert pad_ylim((10.0, 100.0), "log", 0.0) == (10.0, 100.0)
+    assert pad_ylim((50.0, 50.0), "log", 0.1) == (50.0, 50.0)
+
+
+def test_padding_keeps_extreme_references_off_the_spines():
+    from evolmc.plotting import derive_limits
+
+    class FakeCost:
+        def __init__(self, b): self.bpw_target = self.bpw_model = b
+
+    class FakeGenome:
+        k_choices = (2, 8192)
+        def encode_uniform(self, k): return k
+
+    class FakeComp:
+        genome = FakeGenome()
+        def cost_only(self, k): return FakeCost(1.0 if k == 2 else 13.0)
+
+    baselines = [17884.0, 1.045e8, 58.7, 27.7]
+    cfg = Config()
+    cfg.plot.ylim_max_ratio = None
+    _, ylim = derive_limits(FakeComp(), cfg, baselines, fp16_ppl=27.675)
+    assert all(ylim[0] < b < ylim[1] for b in baselines)   # strictly inside
+
+
+def test_marker_size_is_configurable_and_shared(tmp_path):
+    cfg = _cfg("ieee", "column")
+    assert cfg.plot.marker_pt == pytest.approx(3.5)
+
+    plotter = ParetoPlotter(_Run(str(tmp_path)), cfg, (2.0, 8.0), (10.0, 1e3))
+    assert plotter.marker_pt == pytest.approx(3.5)
+
+    cfg.plot.marker_pt = 2.0
+    plotter = ParetoPlotter(_Run(str(tmp_path)), cfg, (2.0, 8.0), (10.0, 1e3))
+    assert plotter.marker_pt == pytest.approx(2.0)
+
+    captured = {}
+    original = plotter._finish
+
+    def spy(ax, *a, **k):
+        original(ax, *a, **k)
+        captured["ms"] = [l.get_markersize() for l in ax.get_lines()
+                          if l.get_marker() not in ("None", "")]
+        captured["s"] = [c.get_sizes()[0] for c in ax.collections
+                         if len(c.get_sizes())]
+
+    plotter._finish = spy
+    F = np.array([[400.0, 2.1], [20.0, 4.2]])
+    plotter.frame(1, F, F, 10, 0.5)
+    # One setting drives both: line markers take a diameter in points, the
+    # population scatter takes an area, and sits one point smaller so the
+    # front stays the subject.
+    assert all(m == pytest.approx(2.0) for m in captured["ms"])
+    assert all(v == pytest.approx((2.0 - 1) ** 2) for v in captured["s"])
+
+
+def test_absolute_ylim_min_overrides_the_ratio_and_is_not_padded():
+    from evolmc.plotting import derive_limits
+
+    class FakeCost:
+        def __init__(self, b): self.bpw_target = self.bpw_model = b
+
+    class FakeGenome:
+        k_choices = (2, 8192)
+        def encode_uniform(self, k): return k
+
+    class FakeComp:
+        genome = FakeGenome()
+        def cost_only(self, k): return FakeCost(1.0 if k == 2 else 13.0)
+
+    baselines = [17884.0, 1.045e8, 58.7, 27.7]
+    cfg = Config()
+    cfg.plot.ylim_max_ratio = None
+
+    _, ratio = derive_limits(FakeComp(), cfg, baselines, fp16_ppl=27.675)
+    assert ratio[0] < 27.675          # ratio-derived and padded downward
+
+    cfg.plot.ylim_min = 1.0
+    _, exact = derive_limits(FakeComp(), cfg, baselines, fp16_ppl=27.675)
+    assert exact[0] == 1.0            # exactly 1.0, padding does not open it
+    # The ceiling still clears every reference. It grows slightly versus the
+    # ratio-derived box because ylim_pad is a fraction of the span, and pinning
+    # the floor at 1.0 makes the span wider.
+    assert exact[1] > max(baselines)
+    assert exact[1] >= ratio[1]
+
+
+def test_refit_never_moves_an_explicit_floor():
+    from evolmc.search import _refit_box
+
+    cfg = Config()
+    cfg.plot.ylim_max_ratio = None
+    cfg.plot.ylim_min = 1.0
+    # A candidate below the floor would normally reopen it.
+    records = [{"front": [[0.5, 2.0], [9e6, 3.0]]}]
+    lo, hi = _refit_box(records, [], (1.0, 332.0), cfg)
+    assert lo == 1.0                  # pinned
+    assert hi == pytest.approx(9e6 * 1.05)   # ceiling still opens
+
+
+def test_uncapped_is_the_default_ceiling_policy():
+    """Every config should show every point unless it opts into a cap."""
+    assert Config().plot.ylim_max_ratio is None
+
+
+def test_default_config_leaves_no_reference_off_scale():
+    from evolmc.plotting import derive_limits
+
+    class FakeCost:
+        def __init__(self, b): self.bpw_target = self.bpw_model = b
+
+    class FakeGenome:
+        k_choices = (2, 8192)
+        def encode_uniform(self, k): return k
+
+    class FakeComp:
+        genome = FakeGenome()
+        def cost_only(self, k): return FakeCost(1.0 if k == 2 else 13.0)
+
+    # The real GPT-2 spread, four decades between the worst and the best.
+    baselines = [17884.2, 1.045e8, 19573.9, 264222.2, 615.9, 58.7, 27.7]
+    _, ylim = derive_limits(FakeComp(), Config(), baselines, fp16_ppl=27.675)
+    assert all(ylim[0] <= b <= ylim[1] for b in baselines)
+
+
+def test_ylim_option_names_are_symmetric():
+    """lower/upper should read as a pair, absolute and ratio each -- matching
+    matplotlib's set_ylim(bottom, top) rather than inventing a metaphor."""
+    names = {f.name for f in __import__("dataclasses").fields(Config().plot)}
+    assert {"ylim_min", "ylim_min_ratio",
+            "ylim_max", "ylim_max_ratio"} <= names
+    assert {"xlim_min", "xlim_max"} <= names
+    assert not names & {"ylim_headroom", "ylim_floor", "ylim_floor_ratio",
+                        "ylim_ceiling", "ylim_ceiling_ratio", "ylim_lower",
+                        "ylim_upper", "xlim", "ylim"}
+
+
+def test_absolute_ceiling_overrides_the_ratio_and_is_not_padded():
+    from evolmc.plotting import derive_limits
+
+    class FakeCost:
+        def __init__(self, b): self.bpw_target = self.bpw_model = b
+
+    class FakeGenome:
+        k_choices = (2, 8192)
+        def encode_uniform(self, k): return k
+
+    class FakeComp:
+        genome = FakeGenome()
+        def cost_only(self, k): return FakeCost(1.0 if k == 2 else 13.0)
+
+    cfg = Config()
+    cfg.plot.ylim_min = 1.0
+    cfg.plot.ylim_max = 1000.0
+    cfg.plot.ylim_max_ratio = 12.0        # ignored while the absolute is set
+    _, ylim = derive_limits(FakeComp(), cfg, [17884.0, 58.7], fp16_ppl=27.675)
+    assert ylim == (1.0, 1000.0)              # both exact, neither padded
+
+
+def test_refit_never_moves_an_explicit_ceiling():
+    from evolmc.search import _refit_box
+
+    cfg = Config()
+    cfg.plot.ylim_max = 500.0
+    records = [{"front": [[9e6, 2.0]]}]
+    assert _refit_box(records, [], (1.0, 500.0), cfg) is None
+
+
+@pytest.mark.parametrize("old,new,value", [
+    ("ylim_headroom", "ylim_max_ratio", 12.0),
+    ("ylim_ceiling", "ylim_max", 1000.0),
+    ("ylim_ceiling_ratio", "ylim_max_ratio", 8.0),
+    ("ylim_floor", "ylim_min", 1.0),
+    ("ylim_floor_ratio", "ylim_min_ratio", 0.8),
+    ("ylim_lower", "ylim_min", 2.0),
+    ("ylim_upper_ratio", "ylim_max_ratio", 6.0),
+])
+def test_retired_option_names_still_load_with_a_warning(old, new, value):
+    """A run's stored config.yaml must keep replotting across renames."""
+    import warnings
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        cfg = Config.from_dict({"plot": {old: value}})
+    assert getattr(cfg.plot, new) == pytest.approx(value)
+    assert any(old in str(w.message) and new in str(w.message) for w in caught)
+
+
+def test_retired_limit_pairs_split_into_scalars():
+    """`ylim: [lo, hi]` used to carry both bounds; a stored config still loads."""
+    import warnings
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        cfg = Config.from_dict({"plot": {"ylim": [1.0, 500.0],
+                                         "xlim": [0.5, 13.0]}})
+    assert (cfg.plot.ylim_min, cfg.plot.ylim_max) == (1.0, 500.0)
+    assert (cfg.plot.xlim_min, cfg.plot.xlim_max) == (0.5, 13.0)
+    assert sum("split into" in str(w.message) for w in caught) == 2
+
+    # A null pair is simply dropped, leaving both bounds derived.
+    cfg = Config.from_dict({"plot": {"ylim": None}})
+    assert cfg.plot.ylim_min is None and cfg.plot.ylim_max is None
+
+
+def test_x_bounds_override_the_derived_range():
+    from evolmc.plotting import derive_limits
+
+    class FakeCost:
+        def __init__(self, b): self.bpw_target = self.bpw_model = b
+
+    class FakeGenome:
+        k_choices = (2, 8192)
+        def encode_uniform(self, k): return k
+
+    class FakeComp:
+        genome = FakeGenome()
+        def cost_only(self, k): return FakeCost(1.0 if k == 2 else 13.0)
+
+    cfg = Config()
+    xlim, _ = derive_limits(FakeComp(), cfg, [100.0], fp16_ppl=27.0)
+    assert xlim[0] < 1.0 and xlim[1] > 13.0        # derived, with padding
+
+    cfg.plot.xlim_min, cfg.plot.xlim_max = 0.0, 16.0
+    xlim, _ = derive_limits(FakeComp(), cfg, [100.0], fp16_ppl=27.0)
+    assert xlim == (0.0, 16.0)                     # exact
+
+    cfg.plot.xlim_min, cfg.plot.xlim_max = 2.0, None
+    xlim, _ = derive_limits(FakeComp(), cfg, [100.0], fp16_ppl=27.0)
+    assert xlim[0] == 2.0 and xlim[1] > 13.0       # one end pinned, one derived

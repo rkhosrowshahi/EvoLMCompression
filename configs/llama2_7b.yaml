@@ -66,5 +66,3 @@ plot:
   style: paper               # 'dark' for slides
   yscale: log                # perplexity spans orders of magnitude
   figsize: [7.0, 5.0]
-  xlim: null                 # derived once from k_choices, then frozen
-  ylim: null                 # derived once from the baselines, then frozen

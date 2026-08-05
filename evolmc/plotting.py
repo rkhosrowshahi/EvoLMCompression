@@ -20,6 +20,7 @@ of a series hue.
 
 from __future__ import annotations
 
+import math
 import os
 
 import matplotlib
@@ -214,10 +215,8 @@ def derive_limits(compressor, cfg, baselines=None, fp16_ppl=None):
                     else cost.bpw_model)
     lo, hi = min(bpws), max(bpws)
     pad = 0.05 * (hi - lo) if hi > lo else 0.5
-    xlim = tuple(cfg.plot.xlim) if cfg.plot.xlim else (lo - pad, hi + pad)
-
-    if cfg.plot.ylim:
-        return xlim, _check_ylim(tuple(cfg.plot.ylim), cfg.plot.yscale)
+    xlim = (cfg.plot.xlim_min if cfg.plot.xlim_min is not None else lo - pad,
+            cfg.plot.xlim_max if cfg.plot.xlim_max is not None else hi + pad)
 
     ppls = [p for p in (list(baselines or []) + [fp16_ppl]) if p and np.isfinite(p)]
     if not ppls:
@@ -229,13 +228,41 @@ def derive_limits(compressor, cfg, baselines=None, fp16_ppl=None):
     # the whole axis to one blown-up low-K baseline -- those go off-scale and
     # are counted in the frame instead.
     anchor = fp16_ppl if (fp16_ppl and np.isfinite(fp16_ppl)) else float(np.median(ppls))
-    lo = min(min(ppls), anchor) * cfg.plot.ylim_floor_ratio
-    hi = min(max(ppls), anchor * cfg.plot.ylim_headroom)
+    floor = cfg.plot.ylim_min
+    lo = (float(floor) if floor is not None
+          else min(min(ppls), anchor) * cfg.plot.ylim_min_ratio)
+    ceiling = cfg.plot.ylim_max
+    if ceiling is not None:
+        hi = float(ceiling)
+    elif cfg.plot.ylim_max_ratio is None:
+        hi = max(ppls)            # no cap: every reference point fits
+    else:
+        hi = min(max(ppls), anchor * cfg.plot.ylim_max_ratio)
     hi = max(hi, anchor * 1.5, lo * 1.2)
-    if cfg.plot.yscale == "log":
-        return xlim, _check_ylim((lo, hi), "log")
-    span = max(hi - lo, 1e-9)
-    return xlim, _check_ylim((lo - 0.08 * span, hi + 0.08 * span), "linear")
+    padded = pad_ylim((lo, hi), cfg.plot.yscale, cfg.plot.ylim_pad)
+    # Explicit bounds mean exactly that, so padding does not open them.
+    if floor is not None:
+        padded = (float(floor), padded[1])
+    if ceiling is not None:
+        padded = (padded[0], float(ceiling))
+    return xlim, _check_ylim(padded, cfg.plot.yscale)
+
+
+def pad_ylim(ylim, yscale, frac):
+    """Open both ends of the y box by `frac` of its span.
+
+    In log space the span is measured in decades, so the padding is
+    multiplicative and looks even at both ends of a wide axis -- an additive
+    pad would be invisible at the top and enormous at the bottom.
+    """
+    lo, hi = float(ylim[0]), float(ylim[1])
+    if frac <= 0 or hi <= lo:
+        return lo, hi
+    if yscale == "log":
+        d = (math.log10(hi) - math.log10(lo)) * frac
+        return max(10 ** (math.log10(lo) - d), 1.0), 10 ** (math.log10(hi) + d)
+    span = (hi - lo) * frac
+    return lo - span, hi + span
 
 
 def _check_ylim(ylim, yscale):
@@ -251,7 +278,7 @@ def _check_ylim(ylim, yscale):
         raise ValueError(
             f"plot.ylim lower bound must be > 0 on a log axis (got {lo}). "
             "Perplexity is bounded below by 1.0, not 0 -- use ylim: [1.0, ...] "
-            "for the theoretical floor, lower plot.ylim_floor_ratio to open up "
+            "for the theoretical floor, lower plot.ylim_min_ratio to open up "
             "room under fp16, or switch to plot.yscale: linear."
         )
     if hi <= lo:
@@ -279,7 +306,7 @@ class ParetoPlotter:
         self.base_pt = float(matplotlib.rcParams["font.size"])
         # One marker size for the whole figure: the front draws it as a
         # diameter, the population scatter as an area (see frame()).
-        self.marker_pt = 5.0
+        self.marker_pt = float(cfg.plot.marker_pt)
         # The K= tags label a reference curve, not the result; they should be
         # readable on inspection without competing with the axis labels.
         self.annot_pt = (cfg.plot.annotation_pt if cfg.plot.annotation_pt
@@ -312,9 +339,10 @@ class ParetoPlotter:
 
         drawn = []
         if not minimal:
-            # scatter sizes are areas in pt^2, plot markersize is a diameter in
-            # pt, so squaring is what makes the population dots render the same
-            # size as the front markers.
+            # scatter sizes are areas in pt^2 while plot markersize is a
+            # diameter in pt, hence the square. The -1 keeps the cloud one
+            # point smaller than the front markers, so the front stays the
+            # figure's subject and the population reads as context.
             self._scatter(ax, F_pop, color=t["cloud"],
                           size=(self.marker_pt-1) ** 2, z=2,
                           label=f"population (gen {gen})")
@@ -330,7 +358,7 @@ class ParetoPlotter:
 
         if self.baselines:
             b = np.array([[r[0], r[1]] for r in self.baselines], dtype=float)
-            ax.plot(b[:, 0], b[:, 1], ls=(0, (6, 3)), lw=1.8,
+            ax.plot(b[:, 0], b[:, 1], ls=(0, (6, 3)), lw=1.4,
                     color=t["baseline"], marker="s", ms=self.marker_pt,
                     mfc=t["surface"], mew=1.4, zorder=4,
                     label=self.cfg.baseline_label)
@@ -339,9 +367,9 @@ class ParetoPlotter:
         if len(F_front):
             order = np.argsort(F_front[:, 1])
             f = F_front[order]
-            ax.plot(f[:, 1], f[:, 0], lw=1.8, color=t["front"], marker="o",
+            ax.plot(f[:, 1], f[:, 0], lw=1.4, color=t["front"], marker="o",
                     ms=self.marker_pt, mfc=t["front"], mec=t["surface"],
-                    mew=1.2, zorder=5, label="Pareto front (NSGA-II)")
+                    mew=0.8, zorder=5, label="Pareto front (NSGA-II)")
             drawn.append(f)
 
         # Count *distinct* candidates outside the box. The front is a subset of
@@ -367,10 +395,19 @@ class ParetoPlotter:
         """
         t = self.theme
         span = self.xlim[1] - self.xlim[0]
+        # Skip a tag that would overprint the previous one. Points bunch up
+        # wherever the curve flattens -- on GPT-2 every K from 512 up sits at
+        # the same perplexity -- and overlapping labels are worse than absent
+        # ones, since the curve itself already shows the points are there.
+        min_gap = 0.075
+        last_frac = -1.0
         for bpw, ppl, k in self.baselines:
             if not self._inside(bpw, ppl):
                 continue
             frac = (bpw - self.xlim[0]) / max(span, 1e-9)
+            if frac - last_frac < min_gap:
+                continue
+            last_frac = frac
             ha, dx = "center", 0
             if frac > 0.9:
                 ha, dx = "right", 4
@@ -658,12 +695,12 @@ def plot_front_on_corpus(stem, cfg, front, baseline=None, fp16=None,
     if baseline is not None and len(baseline):
         b = np.asarray(baseline, dtype=float)
         b = b[np.argsort(b[:, 0])]
-        ax.plot(b[:, 0], b[:, 1], ls=(0, (6, 3)), lw=1.6, color=t["baseline"],
-                marker="s", ms=5, mfc=t["surface"], mew=1.4, zorder=3,
-                label=cfg.plot.baseline_label)
-    ax.plot(f[:, 0], f[:, 1], lw=1.8, color=t["front"], marker="o", ms=5,
-            mfc=t["front"], mec=t["surface"], mew=1.2, zorder=4,
-            label="Pareto front (NSGA-II)")
+        ax.plot(b[:, 0], b[:, 1], ls=(0, (6, 3)), lw=1.4, color=t["baseline"],
+                marker="s", ms=cfg.plot.marker_pt, mfc=t["surface"], mew=1.1,
+                zorder=3, label=cfg.plot.baseline_label)
+    ax.plot(f[:, 0], f[:, 1], lw=1.4, color=t["front"], marker="o",
+            ms=cfg.plot.marker_pt, mfc=t["front"], mec=t["surface"], mew=0.8,
+            zorder=4, label="Pareto front (NSGA-II)")
 
     ax.set_xlabel("bits per weight", fontsize=pt, color=t["ink_2"])
     ax.set_ylabel(f"{corpus} perplexity" + (" (log)" if cfg.plot.yscale == "log"
@@ -689,13 +726,14 @@ def plot_calib_vs_eval(stem, cfg, bpw, ppl_calib, ppl_eval,
     order = np.argsort(np.asarray(bpw, dtype=float))
     x = np.asarray(bpw, dtype=float)[order]
 
-    ax.plot(x, np.asarray(ppl_calib, dtype=float)[order], lw=1.8,
-            color=t["front"], marker="o", ms=5, mfc=t["front"],
-            mec=t["surface"], mew=1.2, zorder=4,
+    ax.plot(x, np.asarray(ppl_calib, dtype=float)[order], lw=1.4,
+            color=t["front"], marker="o", ms=cfg.plot.marker_pt,
+            mfc=t["front"], mec=t["surface"], mew=0.8, zorder=4,
             label=f"{calib_name} (search objective)")
-    ax.plot(x, np.asarray(ppl_eval, dtype=float)[order], lw=1.8,
-            color=t["baseline"], marker="s", ms=5, mfc=t["baseline"],
-            mec=t["surface"], mew=1.2, zorder=5, label=f"{eval_name}")
+    ax.plot(x, np.asarray(ppl_eval, dtype=float)[order], lw=1.4,
+            color=t["baseline"], marker="s", ms=cfg.plot.marker_pt,
+            mfc=t["baseline"], mec=t["surface"], mew=0.8, zorder=5,
+            label=f"{eval_name}")
 
     ax.set_xlabel("bits per weight", fontsize=pt, color=t["ink_2"])
     ax.set_ylabel("perplexity" + (" (log)" if cfg.plot.yscale == "log" else ""),
@@ -721,7 +759,7 @@ def plot_proxy_correlation(stem, cfg, ppl_calib, ppl_eval, rho=None,
     ok = np.isfinite(a) & np.isfinite(b) & (a > 0) & (b > 0)
     a, b = a[ok], b[ok]
 
-    ax.scatter(a, b, s=25, c=t["front"], lw=0, zorder=3,
+    ax.scatter(a, b, s=cfg.plot.marker_pt ** 2, c=t["front"], lw=0, zorder=3,
                label=f"front members (n={len(a)})")
     if len(a) > 1:
         lo = min(a.min(), b.min()) * 0.9

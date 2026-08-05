@@ -10,7 +10,27 @@ import dataclasses
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+import warnings
+
 import yaml
+
+# Old option names still accepted, so a run's stored config.yaml keeps
+# replotting after a rename.
+_RENAMED = {
+    "ylim_headroom": "ylim_max_ratio",
+    "ylim_ceiling": "ylim_max",
+    "ylim_ceiling_ratio": "ylim_max_ratio",
+    "ylim_floor": "ylim_min",
+    "ylim_floor_ratio": "ylim_min_ratio",
+    "ylim_lower": "ylim_min",
+    "ylim_lower_ratio": "ylim_min_ratio",
+    "ylim_upper": "ylim_max",
+    "ylim_upper_ratio": "ylim_max_ratio",
+}
+
+# `xlim: [lo, hi]` / `ylim: [lo, hi]` used to carry both bounds in one pair.
+# They now split across two scalars, so a stored config still loads.
+_SPLIT = {"xlim": ("xlim_min", "xlim_max"), "ylim": ("ylim_min", "ylim_max")}
 
 Granularity = Literal["per_tensor", "per_channel", "per_group"]
 Binning = Literal["uniform", "quantile", "kmeans"]
@@ -169,15 +189,32 @@ class PlotConfig:
     style: Literal["paper", "dark"] = "paper"
     yscale: Literal["log", "linear"] = "log"
     figsize: tuple[float, float] = (7.0, 5.0)
-    # Axis limits are frozen for the whole run so frames are comparable.
-    # Leave null to derive them once, before the first generation.
-    xlim: tuple[float, float] | None = None
-    ylim: tuple[float, float] | None = None
+    # Axis bounds, frozen for the whole run so frames are comparable. Any left
+    # null is derived once, before the first generation. Every bound here is
+    # absolute: it overrides the corresponding ratio, is exempt from ylim_pad,
+    # and refit_at_end never moves it.
+    xlim_min: float | None = None
+    xlim_max: float | None = None
+    ylim_min: float | None = None
+    ylim_max: float | None = None
     # When deriving ylim, cap the top at this multiple of the median reference
     # perplexity. Without it a single blown-up low-K baseline (perplexity in
     # the millions) sets the ceiling and squashes the region you care about
     # into a sliver. Off-scale points are still counted in the frame.
-    ylim_headroom: float = 12.0
+    # Upper bound, mirroring the lower bound above.
+    #   ylim_max        absolute; overrides the ratio, is not padded, and
+    #                       refit_at_end never moves it.
+    #   ylim_max_ratio  a multiple of the fp16 perplexity. Null (the
+    #                       default) means NO CAP: the box opens to the highest
+    #                       reference point and refit_at_end raises it further
+    #                       to cover every candidate, so nothing is ever drawn
+    #                       off-scale.
+    #
+    # Capping costs you points and buys vertical resolution: one blown-up low-K
+    # candidate can stretch the axis across many decades. Anything excluded is
+    # counted in the frame's "candidates outside axes" note, never hidden.
+    ylim_max: float | None = None
+    ylim_max_ratio: float | None = None
     # Where the bottom of the box sits, as a multiple of the lowest reference
     # perplexity (fp16). Lower it to open up room under the fp16 line.
     #
@@ -185,7 +222,17 @@ class PlotConfig:
     # 0 -- PPL 1 means every correct token got probability 1. Set
     # `ylim: [1.0, ...]` to show that theoretical floor. 0 is not representable
     # on a log axis at all, and is rejected with an explanatory error.
-    ylim_floor_ratio: float = 0.9
+    # Absolute y floor. Overrides ylim_min_ratio when set, is exempt from
+    # ylim_pad (an explicit floor means exactly that), and is never moved by
+    # refit_at_end. 1.0 is the theoretical minimum: perplexity is
+    # exp(cross-entropy) and cross-entropy is non-negative.
+    ylim_min: float | None = None
+    ylim_min_ratio: float = 0.9
+    # Breathing room added to BOTH ends of the y box, as a fraction of its
+    # span. Measured in log units when yscale is log, so 0.03 on a 6-decade
+    # axis is ~0.18 of a decade at each end. Without it the extreme points sit
+    # exactly on the spines and read as clipped.
+    ylim_pad: float = 0.03
     # Legend background opacity. The frame is deliberately see-through so it
     # never hides population points behind it; the label text is drawn on top
     # and stays fully opaque regardless.
@@ -195,6 +242,9 @@ class PlotConfig:
     baseline_label: str = "exponential search (baseline)"
     # Point size for the small K= tags on that curve. Null -> base font - 3.
     annotation_pt: float | None = None
+    # Marker diameter in points. Governs the front and baseline markers; the
+    # population scatter uses its square, since scatter sizes are areas.
+    marker_pt: float = 3.5
     # The box is frozen from the reference points *before* any candidate is
     # evaluated, so a search that beats fp16 lands under the floor and is drawn
     # clipped against the axis. When true, the floor is refit once at the end
@@ -242,7 +292,25 @@ class Config:
                 return cls()
             fields = {f.name: f for f in dataclasses.fields(cls)}
             kwargs = {}
+
+            blob = dict(blob)
+            for key, (lo_name, hi_name) in _SPLIT.items():
+                if key not in blob or lo_name not in fields:
+                    continue
+                pair = blob.pop(key)
+                warnings.warn(f"{cls.__name__}.{key} was split into "
+                              f"{lo_name} and {hi_name}",
+                              DeprecationWarning, stacklevel=2)
+                if pair is not None:
+                    blob.setdefault(lo_name, pair[0])
+                    blob.setdefault(hi_name, pair[1])
+
             for key, val in blob.items():
+                if key in _RENAMED:
+                    new = _RENAMED[key]
+                    warnings.warn(f"{cls.__name__}.{key} was renamed to {new}",
+                                  DeprecationWarning, stacklevel=2)
+                    key = new
                 if key not in fields:
                     raise KeyError(f"unknown option {cls.__name__}.{key}")
                 if isinstance(val, list):
