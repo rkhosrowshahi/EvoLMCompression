@@ -1,0 +1,19 @@
+torch>=2.1
+transformers>=4.40
+pymoo>=0.6.1
+numpy>=1.24
+pyyaml>=6.0
+matplotlib>=3.7      # figures; also supplies Pillow for gif encoding
+
+# Real corpora (WikiText-2 / C4). Not needed for scripts/smoke_test.py.
+datasets>=2.18
+
+# Zero-shot task evaluation for the final Pareto front.
+# lm-eval>=0.4.2
+
+# Tests
+pytest>=7.0
+
+# Optional: mp4 encoding of Pareto frames. Without it, gif is written via
+# Pillow (a matplotlib dependency, always present).
+#   macOS: brew install ffmpeg    Debian/Ubuntu: apt install ffmpeg

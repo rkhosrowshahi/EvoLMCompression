@@ -1,0 +1,58 @@
+EvoLMCompression — Restricted Academic License
+Copyright (c) 2026 rkhosrowshahi (https://github.com/rkhosrowshahi)
+All rights reserved.
+
+This is NOT an open-source licence. It is published for inspection and for
+establishing authorship of this work, not for reuse.
+
+
+1. GRANT
+
+You may view this repository, and you may run the Software privately for the
+sole purpose of verifying the results it produces.
+
+
+2. RESTRICTIONS
+
+Without the prior written permission of the copyright holder, you may NOT:
+
+  a. copy, redistribute, host, mirror, or sublicense the Software or any
+     substantial portion of it;
+
+  b. create derivative works, including ports, adaptations, or
+     reimplementations derived from this source;
+
+  c. use the Software, its outputs, its figures, or results obtained with it
+     in any published or publicly disseminated work — including but not
+     limited to journal articles, conference papers, preprints, theses,
+     technical reports, patent applications, talks, and blog posts;
+
+  d. use the Software for any commercial purpose, or incorporate it into any
+     product or service;
+
+  e. use the Software to train, fine-tune, or evaluate any machine-learning
+     model that is subsequently distributed or offered as a service.
+
+
+3. PERMISSION AND CITATION
+
+Requests for permission should be directed to the copyright holder through
+the repository's issue tracker. Where permission is granted, the resulting
+work must cite this repository and any associated publication.
+
+
+4. SCOPE
+
+This licence governs the Software — the source code in this repository. It
+does not, and cannot, restrict independent development of the underlying
+methods by others. Third-party dependencies remain under their own licences.
+
+
+5. NO WARRANTY
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+COPYRIGHT HOLDER BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
+IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.

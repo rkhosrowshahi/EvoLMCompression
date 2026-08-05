@@ -1,0 +1,70 @@
+# Tier 2 -- the config that has to exist for the paper to be accepted.
+# H100 80GB: live model 13.5 GB + master copy 13.5 GB + activations ~2 GB.
+# RTX 3060: set master_device: cpu and expect a large slowdown; this tier is
+# really an H100 job.
+#
+# Budget: 40 x 40 = 1600 evaluations. At ~16 proxy windows that is roughly
+# 4-6 s per evaluation on an H100, i.e. 2-3 hours. Raising n_proxy_seq to 128
+# would make the same run take a day -- validate the proxy with
+# evaluate.rank_correlation instead of paying that.
+
+model:
+  name: meta-llama/Llama-2-7b-hf
+  dtype: float16
+  device: cuda
+  master_device: cuda
+
+quant:
+  granularity: per_channel
+  # NOTE: per_group with group_size 128 stores 4096*11008/128 codebooks for a
+  # single down_proj -- about 2 extra bits per weight. Codebook quantization
+  # wants per-channel; group-wise granularity belongs to affine quantization.
+  # Run it once as an ablation to show exactly this, then leave it off.
+  group_size: 128
+  binning: uniform
+  k_choices: [2, 4, 8, 16, 32, 64, 128, 256]
+  codebook_bits: 16
+
+prune:
+  enabled: true
+  mode: sigma
+  t_max: 2.0
+
+variables:
+  # 7 types x 1 var = 7 K variables. Move to `block` (32) or `block_type` (224)
+  # for the dimensionality ablation, and switch search.algorithm to unsga3 when
+  # you do.
+  k_grouping: type
+  prune_grouping: type
+
+data:
+  calib_dataset: c4
+  eval_dataset: wikitext2
+  seqlen: 2048
+  n_proxy_seq: 16
+  n_eval_seq: 128
+
+search:
+  algorithm: nsga2
+  pop_size: 40
+  n_gen: 40
+  seed: 0
+  warm_start: true
+  max_bpw: null              # e.g. 4.0 to search only the sub-4-bit regime
+  size_objective: bpw_target
+
+log:
+  root: logs
+  checkpoint_every: 2
+  save_history: true
+
+plot:
+  enabled: true
+  every: 1                   # a frame per generation; raise for long runs
+  formats: [png, pdf]
+  dpi: 150
+  style: paper               # 'dark' for slides
+  yscale: log                # perplexity spans orders of magnitude
+  figsize: [7.0, 5.0]
+  xlim: null                 # derived once from k_choices, then frozen
+  ylim: null                 # derived once from the baselines, then frozen

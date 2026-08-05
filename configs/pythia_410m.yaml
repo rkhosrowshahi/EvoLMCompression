@@ -1,0 +1,56 @@
+# Tier 1 -- the "CIFAR-10" config. Runs comfortably on the RTX 3060.
+# Swap `model.name` across EleutherAI/pythia-{160m,410m,1.4b,2.8b} to produce
+# the scaling curve; the Pythia suite shares one training corpus, so the trend
+# is attributable to model size rather than to data.
+
+model:
+  name: EleutherAI/pythia-410m
+  dtype: float16
+  device: cuda
+  master_device: cuda        # ~0.8 GB; move to cpu at 2.8b if VRAM is tight
+
+quant:
+  granularity: per_channel
+  binning: uniform
+  k_choices: [2, 4, 8, 16, 32, 64, 128, 256]
+  codebook_bits: 16
+
+prune:
+  enabled: true
+  mode: sigma
+  t_max: 2.0
+
+variables:
+  k_grouping: type           # query_key_value, dense, dense_h_to_4h, dense_4h_to_h
+  prune_grouping: type
+
+data:
+  calib_dataset: c4
+  eval_dataset: wikitext2
+  seqlen: 2048
+  n_proxy_seq: 16
+  n_eval_seq: 128
+
+search:
+  algorithm: nsga2
+  pop_size: 40
+  n_gen: 40
+  seed: 0
+  warm_start: true
+  size_objective: bpw_target
+
+log:
+  root: logs
+  checkpoint_every: 5
+  save_history: true
+
+plot:
+  enabled: true
+  every: 1                   # a frame per generation; raise for long runs
+  formats: [png, pdf]
+  dpi: 150
+  style: paper               # 'dark' for slides
+  yscale: log                # perplexity spans orders of magnitude
+  figsize: [7.0, 5.0]
+  xlim: null                 # derived once from k_choices, then frozen
+  ylim: null                 # derived once from the baselines, then frozen
