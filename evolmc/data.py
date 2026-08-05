@@ -46,6 +46,30 @@ def _synthetic(tokenizer, n_tokens: int, seed: int) -> torch.Tensor:
     return torch.randint(0, vocab, (1, n_tokens), generator=g)
 
 
+def _load(ds, repo_ids, config, **kwargs):
+    """Load a dataset, trying each candidate repo id in turn.
+
+    Bare names like "wikitext" used to resolve to a canonical dataset. From
+    huggingface_hub 1.x they are rejected outright:
+
+        Repository id must be \'namespace/name\', got \'wikitext\'
+
+    The namespaced id is tried first and works on both 0.x and 1.x; the bare
+    name stays as a fallback for anyone pinned to a hub old enough that the
+    namespaced copy is not what it resolves.
+    """
+    last = None
+    for repo in repo_ids:
+        try:
+            return ds.load_dataset(repo, config, **kwargs)
+        except Exception as e:  # noqa: BLE001 - any resolution failure retries
+            last = e
+    raise RuntimeError(
+        f"could not load {repo_ids[0]} ({config}); tried {', '.join(repo_ids)}. "
+        f"Last error: {last}"
+    ) from last
+
+
 def load_corpus(
     name: str,
     tokenizer,
@@ -64,11 +88,13 @@ def load_corpus(
         ids = _synthetic(tokenizer, n_tokens, seed)
     elif name == "wikitext2":
         ds = _require_datasets()
-        raw = ds.load_dataset("wikitext", "wikitext-2-raw-v1", split=split)
+        raw = _load(ds, ("Salesforce/wikitext", "wikitext"),
+                    "wikitext-2-raw-v1", split=split)
         ids = tokenizer("\n\n".join(raw["text"]), return_tensors="pt").input_ids
     elif name == "ptb":
         ds = _require_datasets()
-        raw = ds.load_dataset("ptb_text_only", "penn_treebank", split=split)
+        raw = _load(ds, ("ptb-text-only/ptb_text_only", "ptb_text_only"),
+                    "penn_treebank", split=split)
         ids = tokenizer("\n\n".join(raw["sentence"]), return_tensors="pt").input_ids
     elif name == "c4":
         ds = _require_datasets()
