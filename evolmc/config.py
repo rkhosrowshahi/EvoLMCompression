@@ -189,49 +189,38 @@ class PlotConfig:
     style: Literal["paper", "dark"] = "paper"
     yscale: Literal["log", "linear"] = "log"
     figsize: tuple[float, float] = (7.0, 5.0)
-    # Axis bounds, frozen for the whole run so frames are comparable. Any left
-    # null is derived once, before the first generation. Every bound here is
-    # absolute: it overrides the corresponding ratio, is exempt from ylim_pad,
-    # and refit_at_end never moves it.
+    # -- axis bounds -------------------------------------------------------
+    # Frozen for the whole run so every frame is comparable. Anything left
+    # null is derived once, before the first generation.
+    #
+    # Each bound may be given absolutely or, on y, as a ratio:
+    #   xlim_min/max     absolute bpw. Null derives from k_choices in closed
+    #                    form, padded 5%.
+    #   ylim_min/max     absolute perplexity.
+    #   ylim_min_ratio   multiple of the lowest reference perplexity.
+    #   ylim_max_ratio   multiple of the fp16 perplexity. Null (the default)
+    #                    means NO CAP: the box opens to the highest reference
+    #                    and refit_at_end raises it to cover every candidate,
+    #                    so nothing is ever drawn off-scale. Capping buys
+    #                    vertical resolution at the price of hiding points,
+    #                    which are then counted in the frame's
+    #                    "candidates outside axes" note.
+    #
+    # An absolute bound always wins over its ratio, is exempt from ylim_pad,
+    # and is never moved by refit_at_end.
+    #
+    # Note perplexity is exp(cross-entropy) and cross-entropy is non-negative,
+    # so PPL >= 1 always. ylim_min: 1.0 is the theoretical floor; 0 cannot be
+    # drawn on a log axis and is rejected with an explanatory error.
     xlim_min: float | None = None
     xlim_max: float | None = None
     ylim_min: float | None = None
     ylim_max: float | None = None
-    # When deriving ylim, cap the top at this multiple of the median reference
-    # perplexity. Without it a single blown-up low-K baseline (perplexity in
-    # the millions) sets the ceiling and squashes the region you care about
-    # into a sliver. Off-scale points are still counted in the frame.
-    # Upper bound, mirroring the lower bound above.
-    #   ylim_max        absolute; overrides the ratio, is not padded, and
-    #                       refit_at_end never moves it.
-    #   ylim_max_ratio  a multiple of the fp16 perplexity. Null (the
-    #                       default) means NO CAP: the box opens to the highest
-    #                       reference point and refit_at_end raises it further
-    #                       to cover every candidate, so nothing is ever drawn
-    #                       off-scale.
-    #
-    # Capping costs you points and buys vertical resolution: one blown-up low-K
-    # candidate can stretch the axis across many decades. Anything excluded is
-    # counted in the frame's "candidates outside axes" note, never hidden.
-    ylim_max: float | None = None
-    ylim_max_ratio: float | None = None
-    # Where the bottom of the box sits, as a multiple of the lowest reference
-    # perplexity (fp16). Lower it to open up room under the fp16 line.
-    #
-    # Perplexity is exp(cross-entropy), so it is bounded below by 1.0, not by
-    # 0 -- PPL 1 means every correct token got probability 1. Set
-    # `ylim: [1.0, ...]` to show that theoretical floor. 0 is not representable
-    # on a log axis at all, and is rejected with an explanatory error.
-    # Absolute y floor. Overrides ylim_min_ratio when set, is exempt from
-    # ylim_pad (an explicit floor means exactly that), and is never moved by
-    # refit_at_end. 1.0 is the theoretical minimum: perplexity is
-    # exp(cross-entropy) and cross-entropy is non-negative.
-    ylim_min: float | None = None
     ylim_min_ratio: float = 0.9
-    # Breathing room added to BOTH ends of the y box, as a fraction of its
-    # span. Measured in log units when yscale is log, so 0.03 on a 6-decade
-    # axis is ~0.18 of a decade at each end. Without it the extreme points sit
-    # exactly on the spines and read as clipped.
+    ylim_max_ratio: float | None = None
+    # Breathing room added to both ends of the y box, as a fraction of its
+    # span -- measured in decades on a log axis, so it looks even at both ends.
+    # Without it the extreme points sit on the spines and read as clipped.
     ylim_pad: float = 0.03
     # Legend background opacity. The frame is deliberately see-through so it
     # never hides population points behind it; the label text is drawn on top

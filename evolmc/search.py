@@ -276,10 +276,8 @@ def _log_hv_reference(run, hv, fp16, baselines, cfg):
     run.log(f"  ideal point     (best corner)   ppl {id_ppl:,.2f}, "
             f"bpw {id_bpw:.3f}  ->  (0.0, 0.0) normalised")
 
-    if fp16 and np.isfinite(fp16):
-        run.log(f"  derived from: fp16 ppl {fp16:,.2f} "
-                f"x {cfg.plot.ylim_min_ratio:g} (floor) "
-                f"and x {cfg.plot.ylim_max_ratio:g} (ceiling)")
+    run.log(f"  y lower: {_bound_origin(cfg.plot.ylim_min, cfg.plot.ylim_min_ratio, fp16, 'lowest reference')}")
+    run.log(f"  y upper: {_bound_origin(cfg.plot.ylim_max, cfg.plot.ylim_max_ratio, fp16, 'highest reference')}")
     if baselines:
         lo = min(baselines, key=lambda b: b[0])
         hi = max(baselines, key=lambda b: b[0])
@@ -292,6 +290,23 @@ def _log_hv_reference(run, hv, fp16, baselines, cfg):
                     f"to the reference corner when scored")
     run.log("  HV is normalised to [0,1]; comparable only across runs sharing "
             "this box")
+
+
+def _bound_origin(absolute, ratio, fp16, uncapped_desc):
+    """Say where a y bound came from.
+
+    Each bound has three possible origins and the message has to match the one
+    that actually applied -- naming a ratio that was overridden by an absolute
+    bound, or that is None because the axis is uncapped, is worse than saying
+    nothing.
+    """
+    if absolute is not None:
+        return f"pinned at {absolute:,.4g}"
+    if ratio is None:
+        return f"uncapped -- opens to the {uncapped_desc}"
+    if fp16 and np.isfinite(fp16):
+        return f"{ratio:g} x fp16 ppl {fp16:,.2f} = {ratio * fp16:,.2f}"
+    return f"{ratio:g} x the {uncapped_desc}"
 
 
 def _refit_box(records, history, ylim, cfg):

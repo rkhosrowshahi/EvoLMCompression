@@ -815,3 +815,49 @@ def test_x_bounds_override_the_derived_range():
     cfg.plot.xlim_min, cfg.plot.xlim_max = 2.0, None
     xlim, _ = derive_limits(FakeComp(), cfg, [100.0], fp16_ppl=27.0)
     assert xlim[0] == 2.0 and xlim[1] > 13.0       # one end pinned, one derived
+
+
+# -- the hypervolume reference printout ------------------------------------
+
+def _hv_log(**plot):
+    """Run _log_hv_reference and return the lines it emitted."""
+    from evolmc.plotting import hv_indicator
+    from evolmc.search import _log_hv_reference
+
+    cfg = Config()
+    for k, v in plot.items():
+        setattr(cfg.plot, k, v)
+
+    lines = []
+
+    class Run:
+        def log(self, msg="", echo=True):
+            lines.append(msg)
+
+    hv = hv_indicator((1.0, 13.0), (22.0, 1e8), cfg.plot.yscale)
+    _log_hv_reference(Run(), hv, 27.675,
+                      [(2.0, 1.0e8, 4), (8.0, 58.7, 256)], cfg)
+    return "\n".join(lines)
+
+
+def test_hv_reference_printout_survives_optional_bounds():
+    """Regression: ylim_max_ratio is None by default, and f"{None:g}" raises
+    TypeError -- which crashed every run after the uncapped default landed."""
+    out = _hv_log()                       # stock config, nothing pinned
+    assert "uncapped" in out
+    assert "hypervolume reference" in out
+
+
+def test_hv_reference_names_the_origin_that_actually_applied():
+    """Naming a ratio that an absolute bound overrode would be a lie."""
+    pinned = _hv_log(ylim_min=1.0, ylim_min_ratio=0.8)
+    assert "pinned at 1" in pinned
+    assert "0.8 x fp16" not in pinned      # the ratio did not apply
+
+    ratio = _hv_log(ylim_min=None, ylim_min_ratio=0.8)
+    assert "0.8 x fp16 ppl 27.68" in ratio
+    assert "pinned" not in ratio.split("y upper")[0]
+
+    capped = _hv_log(ylim_max=None, ylim_max_ratio=12.0)
+    assert "12 x fp16" in capped
+    assert "uncapped" not in capped
