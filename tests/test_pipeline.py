@@ -711,3 +711,62 @@ def test_every_algorithm_builds_with_the_shared_operator_settings(name):
 def test_unknown_algorithm_is_rejected():
     with pytest.raises(ValueError, match="unknown algorithm"):
         _algo(algorithm="cmaes")
+
+
+# -- history persistence ---------------------------------------------------
+
+def test_history_survives_ragged_generations(tmp_path):
+    """Regression: np.stack demands uniform shapes and blows up at the very
+    end, after the whole search has been paid for. Population size is not
+    guaranteed constant -- duplicate elimination, MOEA/D's own sizing, or a
+    partial final generation can all vary it."""
+    from evolmc.search import load_history, save_history
+
+    history = [
+        {"gen": 1, "X": np.zeros((10, 3)), "F": np.ones((10, 2))},
+        {"gen": 2, "X": np.zeros((7, 3)),  "F": np.full((7, 2), 2.0)},
+        {"gen": 3, "X": np.zeros((12, 3)), "F": np.full((12, 2), 3.0)},
+    ]
+    logged = []
+
+    class Run:
+        def log(self, msg="", echo=True): logged.append(msg)
+
+    path = str(tmp_path / "history.npz")
+    save_history(path, history, Run())
+    assert any("varied" in m for m in logged)
+
+    back = load_history(path)
+    assert [g for g, _, _ in back] == [1, 2, 3]
+    assert [len(F) for _, _, F in back] == [10, 7, 12]
+    assert back[1][2][0, 0] == pytest.approx(2.0)
+
+
+def test_uniform_generations_round_trip_without_a_note(tmp_path):
+    from evolmc.search import load_history, save_history
+
+    history = [{"gen": g, "X": np.full((5, 2), g), "F": np.full((5, 2), g)}
+               for g in (1, 2, 3)]
+    logged = []
+
+    class Run:
+        def log(self, msg="", echo=True): logged.append(msg)
+
+    path = str(tmp_path / "h.npz")
+    save_history(path, history, Run())
+    assert not any("varied" in m for m in logged)
+    back = load_history(path)
+    assert [len(F) for _, _, F in back] == [5, 5, 5]
+    assert back[2][1][0, 0] == pytest.approx(3.0)
+
+
+def test_legacy_stacked_history_still_loads(tmp_path):
+    """Runs made before ragged support stored 3-D stacked arrays."""
+    from evolmc.search import load_history
+
+    path = str(tmp_path / "old.npz")
+    np.savez_compressed(path, gens=np.array([1, 2]),
+                        X=np.zeros((2, 5, 3)), F=np.ones((2, 5, 2)))
+    back = load_history(path)
+    assert [g for g, _, _ in back] == [1, 2]
+    assert all(F.shape == (5, 2) for _, _, F in back)

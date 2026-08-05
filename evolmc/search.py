@@ -246,12 +246,7 @@ def run_search(problem, cfg, run, resume_from: str | None = None):
             make_run_video(run, cfg)
 
     if cfg.log.save_history and history:
-        np.savez_compressed(
-            run.file("data", "history.npz"),
-            gens=np.array([h["gen"] for h in history]),
-            X=np.stack([h["X"] for h in history]),
-            F=np.stack([h["F"] for h in history]),
-        )
+        save_history(run.file("data", "history.npz"), history, run)
     return res, records
 
 
@@ -290,6 +285,49 @@ def _log_hv_reference(run, hv, fp16, baselines, cfg):
                     f"to the reference corner when scored")
     run.log("  HV is normalised to [0,1]; comparable only across runs sharing "
             "this box")
+
+
+def save_history(path, history, run=None):
+    """Persist every generation's population, allowing ragged generations.
+
+    Population size is not guaranteed constant: duplicate elimination, an
+    algorithm with its own sizing (MOEA/D takes it from the reference
+    directions), or a partial final generation can all vary it. Stacking into
+    one 3-D array assumes otherwise and raises "all input arrays must have the
+    same shape" -- at the very end, after the whole search has been paid for.
+
+    So rows are concatenated and a per-generation count is stored alongside,
+    which costs nothing and cannot fail.
+    """
+    counts = np.array([len(h["F"]) for h in history], dtype=np.int64)
+    if run is not None and len(set(counts.tolist())) > 1:
+        run.log(f"  note: population size varied across generations "
+                f"({counts.min()}-{counts.max()}); history stored ragged")
+    np.savez_compressed(
+        path,
+        gens=np.array([h["gen"] for h in history]),
+        counts=counts,
+        X=np.concatenate([np.atleast_2d(h["X"]) for h in history]),
+        F=np.concatenate([np.atleast_2d(h["F"]) for h in history]),
+    )
+
+
+def load_history(path):
+    """Read a history file back as a list of (gen, X, F) per generation.
+
+    Handles both layouts: the current concatenated one, and the older stacked
+    3-D arrays from runs made before ragged generations were supported.
+    """
+    with np.load(path) as z:
+        gens, X, F = z["gens"], z["X"], z["F"]
+        counts = z["counts"] if "counts" in z.files else None
+    if counts is None:                      # legacy [gen, pop, k] stacking
+        return [(int(g), X[i], F[i]) for i, g in enumerate(gens)]
+    out, start = [], 0
+    for g, n in zip(gens, counts):
+        out.append((int(g), X[start:start + n], F[start:start + n]))
+        start += n
+    return out
 
 
 def _bound_origin(absolute, ratio, fp16, uncapped_desc):

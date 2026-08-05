@@ -59,11 +59,12 @@ def load_run(run_path):
 
 def load_populations(run_path, n_gen):
     """Per-generation objective values, if history was saved."""
+    from evolmc.search import load_history
+
     path = os.path.join(run_path, "data", "history.npz")
     if not os.path.exists(path):
         return None
-    with np.load(path) as z:
-        return z["F"]
+    return [F for _, _, F in load_history(path)]
 
 
 def main():
@@ -135,7 +136,7 @@ def main():
         # here, just fitted to what actually happened.
         seen = [np.array(g["front"], dtype=float)[:, 0] for g in gens]
         if pops is not None:
-            seen.append(pops.reshape(-1, 2)[:, 0])
+            seen += [F[:, 0] for F in pops]
         vals = np.concatenate(seen)
         vals = vals[np.isfinite(vals) & (vals > 0)]
         if len(vals):
