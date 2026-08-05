@@ -29,7 +29,7 @@ python scripts/run_search.py configs/gpt2_k_layer.yaml
 ```
 
 ```bash
-python scripts/eval_front.py configs/gpt2_k_layer.yaml logs/gpt2-k-layer
+python scripts/run_eval.py configs/gpt2_k_layer.yaml logs/gpt2-k-layer
 ```
 
 Each run writes one timestamped directory under `logs/` containing its config,
@@ -40,7 +40,7 @@ logs, checkpoints, Pareto figures and a video of the front converging.
 | | |
 |---|---|
 | `run_search.py` | run one search from a config |
-| `eval_front.py` | score the front on both corpora, write the paper figures |
+| `run_eval.py` | score the front on both corpora, write the paper figures |
 | `compare_runs.py` | overlay several runs' fronts and tabulate them |
 | `replot.py` | re-render a finished run at a different size or venue |
 | `make_video.py` | encode the per-generation frames to mp4/gif |

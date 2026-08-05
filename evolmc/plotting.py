@@ -616,7 +616,7 @@ def hv_indicator(xlim, ylim, yscale="log"):
 
 
 # -- standalone evaluation figures -----------------------------------------
-# These are drawn after a run, from eval_front.py, and are not part of the
+# These are drawn after a run, from run_eval.py, and are not part of the
 # frozen-box frame sequence: they have their own axes fitted to the data.
 
 def _new_axes(cfg, square=False):

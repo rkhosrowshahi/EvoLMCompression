@@ -59,7 +59,7 @@ for cfg in "${CONFIGS[@]}"; do
   echo "--------------------------------------------------------------"
   echo ">>> EVAL    $run_dir"
   echo "--------------------------------------------------------------"
-  python3 scripts/eval_front.py "$cfg" "$run_dir"
+  python3 scripts/run_eval.py "$cfg" "$run_dir"
 done
 
 echo

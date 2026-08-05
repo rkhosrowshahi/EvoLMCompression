@@ -32,7 +32,7 @@ python scripts/run_search.py configs/dev_gpt2.yaml
 ```
 
 ```bash
-python scripts/eval_front.py configs/dev_gpt2.yaml latest
+python scripts/run_eval.py configs/dev_gpt2.yaml latest
 ```
 
 ### Which corpus the figures show
@@ -42,7 +42,7 @@ C4). Every per-generation frame, the baseline curve, the fp16 line and the
 convergence plot are proxy perplexity on `data.n_proxy_seq` windows of it —
 which is why the y axis reads *proxy* perplexity.
 
-`eval_front.py` then scores every front member on **both** corpora from a
+`run_eval.py` then scores every front member on **both** corpora from a
 single quantization and writes three more figures:
 
 | Figure | What it shows |
@@ -82,7 +82,7 @@ logs/20260804-142530__gpt2__nsga2-p24g20__k-type__p-global__uniform/
     front.csv                the final front as a table
     front.json               the front with full per-layer genomes
     history.npz              every X and F, per generation
-    results.csv              full re-evaluation (written by eval_front.py)
+    results.csv              full re-evaluation (written by run_eval.py)
   checkpoints/
     gen_0005.pkl … latest.pkl
   figures/

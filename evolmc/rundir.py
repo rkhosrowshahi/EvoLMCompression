@@ -13,7 +13,7 @@ Every run gets its own timestamped, self-describing directory under `logs/`:
         baselines.csv             fp16 and uniform-K reference points
         history.npz               every X and F, per generation
         front.csv / front.json    final Pareto front
-        results.csv               full re-evaluation (from eval_front.py)
+        results.csv               full re-evaluation (from run_eval.py)
       checkpoints/
         gen_0005.pkl ... latest.pkl
       figures/

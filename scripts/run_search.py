@@ -96,7 +96,7 @@ def main():
     run.log(f"  figures/pareto_final  final front")
     run.log(f"  figures/convergence   hypervolume vs generation")
     run.log(f"  data/front.csv        the front as a table")
-    run.log(f"\nnext: python scripts/eval_front.py {args.config} {run.path}")
+    run.log(f"\nnext: python scripts/run_eval.py {args.config} {run.path}")
     run.close()
 
 
