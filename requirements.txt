@@ -3,7 +3,9 @@ transformers>=4.40
 pymoo>=0.6.1
 numpy>=1.24
 pyyaml>=6.0
-matplotlib>=3.7      # figures; also supplies Pillow for gif encoding
+matplotlib>=3.7      # figures
+pillow>=9.0          # gif encoding in evolmc/video.py (imported directly,
+                     # so declared rather than leaned on via matplotlib)
 
 # Real corpora (WikiText-2 / C4). Not needed for scripts/smoke_test.py.
 datasets>=2.18
@@ -14,6 +16,6 @@ datasets>=2.18
 # Tests
 pytest>=7.0
 
-# Optional: mp4 encoding of Pareto frames. Without it, gif is written via
-# Pillow (a matplotlib dependency, always present).
+# Optional, not a Python package: ffmpeg enables mp4 encoding of the Pareto
+# frames. Without it only the gif is written, via Pillow above.
 #   macOS: brew install ffmpeg    Debian/Ubuntu: apt install ffmpeg
