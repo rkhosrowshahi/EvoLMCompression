@@ -32,6 +32,12 @@ def main():
     ap.add_argument("--resume", default=None,
                     help="run directory to resume from (uses checkpoints/latest.pkl)")
     ap.add_argument("--no-plots", action="store_true")
+    ap.add_argument("--emit-run-dir", default=None, metavar="FILE",
+                    help="write the resolved run directory to FILE. The "
+                         "directory is not always what log.run_name says: a "
+                         "rerun takes the next free -2/-3 suffix rather than "
+                         "appending to an existing run, so a caller that "
+                         "guesses the name can act on the wrong one.")
     args = ap.parse_args()
 
     cfg = Config.from_yaml(args.config)
@@ -53,6 +59,9 @@ def main():
     else:
         run = RunDir(cfg, name=args.name, root=args.root)
 
+    if args.emit_run_dir:
+        with open(args.emit_run_dir, "w") as f:
+            f.write(run.path)
     run.log(f"run directory: {run.path}\n")
     run.log("loading model ...")
     comp = Compressor(cfg)

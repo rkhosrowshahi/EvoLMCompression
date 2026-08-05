@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
 # GPT-2 codebook-size sweep: global vs block-wise vs layer-wise K.
 #
-# Runs the three configs one after another, then evaluates each resulting
-# Pareto front on the full WikiText-2 split. The three configs differ only in
-# variables.k_grouping, so the fronts are directly comparable.
+# For each config in turn: run the search, then immediately evaluate that
+# run's Pareto front on the held-out corpus, then move to the next config.
+# Doing the eval straight away means a crash later still leaves you with
+# complete results for everything finished so far.
 #
 #   bash scripts/run_gpt2_k_experiments.sh
-#   bash scripts/run_gpt2_k_experiments.sh --n-gen 10       # quick trial
+#   bash scripts/run_gpt2_k_experiments.sh --n-gen 5 --pop 20   # quick trial
 #
-# Any extra arguments are forwarded to run_search.py.
+# Extra arguments are forwarded to run_search.py.
 
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -32,32 +33,46 @@ except ImportError:
     )
 PY
 
+RUN_DIRS=()
+STAMP=$(date +%Y%m%d-%H%M%S)
+DIR_FILE=$(mktemp)
+trap 'rm -f "$DIR_FILE"' EXIT
+
 echo "=============================================================="
 echo " GPT-2 K sweep: 3 experiments, K in [2, 8192], no pruning"
+echo " started $(date)"
 echo "=============================================================="
-echo
 
 for cfg in "${CONFIGS[@]}"; do
   echo
   echo "--------------------------------------------------------------"
   echo ">>> SEARCH  $cfg"
   echo "--------------------------------------------------------------"
-  python3 scripts/run_search.py "$cfg" "$@"
-done
+  # --emit-run-dir reports where the run actually landed. Reading it back
+  # beats guessing from log.run_name: a rerun takes the next free -2/-3
+  # suffix, and evaluating the previous run's front would pass silently.
+  python3 scripts/run_search.py "$cfg" --emit-run-dir "$DIR_FILE" "$@"
+  run_dir=$(cat "$DIR_FILE")
+  RUN_DIRS+=("$run_dir")
 
-for cfg in "${CONFIGS[@]}"; do
-  run_name=$(python3 -c "
-import sys, yaml
-print(yaml.safe_load(open('$cfg'))['log']['run_name'])")
   echo
   echo "--------------------------------------------------------------"
-  echo ">>> FULL EVAL  $run_name"
+  echo ">>> EVAL    $run_dir"
   echo "--------------------------------------------------------------"
-  python3 scripts/eval_front.py "$cfg" "logs/$run_name"
+  python3 scripts/eval_front.py "$cfg" "$run_dir"
 done
 
 echo
 echo "=============================================================="
-echo " done. compare the three runs with:"
-echo "   python3 scripts/compare_runs.py gpt2-k-global gpt2-k-block gpt2-k-layer"
+echo " all three finished $(date)"
 echo "=============================================================="
+for d in "${RUN_DIRS[@]}"; do echo "   $d"; done
+echo
+echo " compare them with:"
+echo "   python3 scripts/compare_runs.py \\"
+for i in "${!RUN_DIRS[@]}"; do
+  sep=$([ "$i" -lt $(( ${#RUN_DIRS[@]} - 1 )) ] && echo " \\" || echo " \\")
+  echo "     $(basename "${RUN_DIRS[$i]}")$sep"
+done
+echo "     --labels 'global (1 var),block-wise (12 var),layer-wise (48 var)' \\"
+echo "     --name granularity-$STAMP --bpw 2,3,4,6,8"
