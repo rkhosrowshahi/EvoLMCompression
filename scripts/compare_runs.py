@@ -30,8 +30,9 @@ import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
 
 from evolmc.config import Config  # noqa: E402
+from evolmc.objectives import from_box  # noqa: E402
 from evolmc.plotting import (  # noqa: E402
-    THEMES, apply_style, hv_indicator, latex_snippet, resolve_figsize,
+    THEMES, apply_style, hv_indicator_nd, latex_snippet, resolve_figsize,
 )
 from evolmc.rundir import find_run  # noqa: E402
 
@@ -51,7 +52,10 @@ def load(run_path):
     gens = [json.loads(l) for l in
             open(os.path.join(run_path, "logs", "generations.jsonl"))]
 
-    front = np.array(gens[-1]["front"], dtype=float)   # [:, (ppl, bpw)]
+    objset, bounds = from_box(box, cfg.search.size_objective)
+    # Columns are the run's objectives in order, in real space; column 0 is
+    # the quality axis and column 1 the size axis for every layout so far.
+    front = np.array(gens[-1]["front"], dtype=float)
     front = front[np.argsort(front[:, 1])]
 
     meta = {}
@@ -59,7 +63,8 @@ def load(run_path):
     if os.path.exists(mpath):
         meta = json.load(open(mpath))
     return dict(path=run_path, name=os.path.basename(run_path), cfg=cfg,
-                box=box, gens=gens, front=front, meta=meta)
+                box=box, gens=gens, front=front, meta=meta,
+                objset=objset, bounds=bounds)
 
 
 def ppl_at(front, bpw):
@@ -104,16 +109,39 @@ def main():
     cfg.plot.formats = tuple(f.strip() for f in args.formats.split(","))
     apply_style(cfg, log=lambda m: print(m.strip()))
 
+    # Hypervolume is only comparable between runs measuring the same things.
+    # A 2-objective and a 3-objective run produce numbers in different units
+    # of volume, and averaging or tabling them side by side is meaningless --
+    # so this is an error rather than a note.
+    objsets = {r["objset"].names for r in runs}
+    if len(objsets) > 1:
+        listing = "\n".join(f"    {r['name']}: {list(r['objset'].names)}"
+                            for r in runs)
+        raise SystemExit(
+            "cannot compare runs with different objectives -- hypervolume is "
+            "measured over different spaces and the numbers are not "
+            f"commensurable:\n{listing}\n"
+            "Compare 2-objective runs with each other and 3-objective runs "
+            "with each other, or plot the shared axes without HV."
+        )
+    objset = runs[0]["objset"]
+
     # One box for everybody, so hypervolume and the figure are comparable.
-    xlim = (min(r["box"]["xlim"][0] for r in runs),
-            max(r["box"]["xlim"][1] for r in runs))
-    ylim = (min(r["box"]["ylim"][0] for r in runs),
-            max(r["box"]["ylim"][1] for r in runs))
-    boxes = {tuple(np.round(r["box"]["xlim"] + r["box"]["ylim"], 4)) for r in runs}
+    # Union per objective, taking each end in its own direction: `ideal` is the
+    # best corner, which for a maximised objective is the LARGER number.
+    shared = []
+    for j, spec in enumerate(objset):
+        ideals = [r["bounds"][j][0] for r in runs]
+        nadirs = [r["bounds"][j][1] for r in runs]
+        shared.append((min(ideals), max(nadirs)) if spec.sense == 1
+                      else (max(ideals), min(nadirs)))
+    xlim = (min(shared[1]), max(shared[1]))
+    ylim = (min(shared[0]), max(shared[0]))
+    boxes = {tuple(np.round(np.ravel(r["bounds"]), 4)) for r in runs}
     if len(boxes) > 1:
         print("note   runs had different axis boxes; using their union and "
               "recomputing every hypervolume on it")
-    hv = hv_indicator(xlim, ylim, cfg.plot.yscale)
+    hv = hv_indicator_nd(shared, [s.log for s in objset], objset.names)
 
     fp16 = next((r["box"].get("fp16_ppl") for r in runs
                  if r["box"].get("fp16_ppl")), None)
@@ -138,6 +166,11 @@ def main():
             "hypervolume": round(hv(f), 5),
             "min_bpw": round(float(f[:, 1].min()), 3),
             "best_ppl": round(float(f[:, 0].min()), 4),
+            # Best value of any objective past the second, in its own
+            # direction. Absent for 2-objective runs.
+            **{f"best_{s.name}": round(
+                float(f[:, j].min() if s.sense == 1 else f[:, j].max()), 4)
+               for j, s in enumerate(objset) if j >= 2},
             **{f"ppl@{b:g}bpw": (round(v, 4) if (v := ppl_at(f, b)) else "")
                for b in levels},
         })
@@ -195,11 +228,15 @@ def main():
     ax.set_xlim(*xlim)
     ax.set_ylim(*ylim)
     ax.set_yscale(cfg.plot.yscale)
-    ax.set_xlabel("bits per weight", fontsize=pt, color=t["ink_2"])
-    ax.set_ylabel("proxy perplexity" + (" (log)" if cfg.plot.yscale == "log" else ""),
+    ax.set_xlabel(objset[1].axis_label, fontsize=pt, color=t["ink_2"])
+    ax.set_ylabel(objset[0].axis_label
+                  + (" (log)" if cfg.plot.yscale == "log" else ""),
                   fontsize=pt, color=t["ink_2"])
     _style(ax, t, pt, cfg.plot.legend_alpha)
     _save(fig, os.path.join(out_dir, "fronts"), cfg, t, exact)
+    if len(objset) > 2:
+        print(f"note   objective(s) {[s.name for s in objset][2:]} are "
+              "optimised but not drawn; the overlay projects onto the first two")
 
     # ---- convergence overlay ---------------------------------------------
     side = figsize[0]

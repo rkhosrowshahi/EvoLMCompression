@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import csv
 import json
+import math
 import os
 import pickle
 import time
@@ -28,7 +29,10 @@ from pymoo.operators.mutation.pm import PM
 from pymoo.util.ref_dirs import get_reference_directions
 
 from .evaluate import proxy_fitness
-from .plotting import ParetoPlotter, derive_limits, hv_indicator
+from .objectives import ObjectiveSet, check_redundancy, spearman_matrix
+from .plotting import (
+    ParetoPlotter, derive_bounds, hv_indicator_nd, refit_bounds,
+)
 from .video import make_run_video
 
 
@@ -58,8 +62,9 @@ def build_algorithm(cfg, genome, sampling):
     if name == "nsga2":
         return NSGA2(eliminate_duplicates=s.eliminate_duplicates, **common)
 
-    n_part = s.ref_dir_partitions or (s.pop_size - 1)
-    ref_dirs = get_reference_directions("das-dennis", 2, n_partitions=n_part)
+    n_obj = len(getattr(s, "objectives", None) or ("ppl_proxy", "bpw_target"))
+    n_part = s.ref_dir_partitions or das_dennis_partitions(n_obj, s.pop_size)
+    ref_dirs = get_reference_directions("das-dennis", n_obj, n_partitions=n_part)
     if name == "unsga3":
         return UNSGA3(ref_dirs=ref_dirs, **common)
     if name == "moead":
@@ -71,6 +76,23 @@ def build_algorithm(cfg, genome, sampling):
         return MOEAD(ref_dirs=ref_dirs, n_neighbors=s.moead_neighbors,
                      prob_neighbor_mating=s.moead_prob_neighbor_mating, **common)
     raise ValueError(f"unknown algorithm: {name}")
+
+
+def das_dennis_partitions(n_obj: int, pop_size: int) -> int:
+    """Smallest p whose Das-Dennis simplex has at least `pop_size` directions.
+
+    The old default was `pop_size - 1`, which is right only at two objectives,
+    where the count IS p + 1. In three it is C(p+2, 2), so pop_size-1 = 99
+    would ask for 5151 reference directions to steer a population of 100 --
+    U-NSGA-III then has a niche per individual and its selection pressure
+    collapses. At M=3, pop 100, this returns 13 (105 directions).
+    """
+    if n_obj <= 2:
+        return max(pop_size - 1, 1)
+    p = 1
+    while math.comb(p + n_obj - 1, n_obj - 1) < pop_size:
+        p += 1
+    return p
 
 
 # -- reference points -------------------------------------------------------
@@ -90,7 +112,7 @@ def baseline_sweep(problem, run):
 
     rows = [{"tag": "fp16", "K": 0, "ppl_proxy": fp16, "bpw_target": 16.0,
              "bpw_model": 16.0, "cr_deployable": 1.0}]
-    points = []
+    points, measured = [], []
     for k in comp.genome.k_choices:
         cand = comp.apply(comp.genome.encode_uniform(k))
         ppl = proxy_fitness(comp.model, problem.windows, device=comp.device)
@@ -98,6 +120,10 @@ def baseline_sweep(problem, run):
         bpw = (s["bpw_target"] if problem.cfg.search.size_objective == "bpw_target"
                else s["bpw_model"])
         rows.append({"tag": f"uniform-K{k}", "K": k, "ppl_proxy": ppl, **s})
+        # Real, measured summaries -- these are what the objective bounds are
+        # derived from. cost_only's flat-histogram estimate would put the true
+        # archival values outside any box derived from it.
+        measured.append({"ppl_proxy": ppl, **s})
         points.append((bpw, ppl, k))
         run.log(f"  uniform K={k:<4}            ppl {ppl:10.3f}   bpw {bpw:5.2f}"
                 f"   CR {s['cr_deployable']:5.2f}x")
@@ -109,7 +135,42 @@ def baseline_sweep(problem, run):
         w = csv.DictWriter(f, fieldnames=fields, restval="")
         w.writeheader()
         w.writerows(rows)
-    return fp16, points
+    return fp16, points, measured
+
+
+def _log_objective_correlations(run, objset, measured):
+    """Say up front whether any two objectives can actually disagree.
+
+    An objective that is a monotone transform of another costs a full search
+    budget to reproduce a front you already have, and the symptom -- a front
+    that looks exactly like the 2-objective one -- is easy to misread as the
+    search failing. Measured on the reference sweep, which is a curve rather
+    than a sample of the whole space, so |rho| here is an *upper* bound on how
+    redundant the pair is: points off the uniform-K curve can only disagree
+    more. |rho| = 1.000 therefore means genuinely redundant.
+    """
+    if len(objset) < 2 or len(measured) < 3:
+        return
+    F = np.array([[m[n] for n in objset.names] for m in measured], dtype=float)
+    rho = spearman_matrix(objset.to_min(F))
+
+    run.log("\nobjective correlation on the reference sweep (Spearman, "
+            "minimisation space)")
+    width = max(len(n) for n in objset.names) + 2
+    run.log("  " + "".ljust(width) + "".join(n[:10].rjust(11)
+                                             for n in objset.names))
+    for i, name in enumerate(objset.names):
+        cells = "".join(f"{rho[i, j]:>11.3f}" for j in range(len(objset)))
+        run.log(f"  {name.ljust(width)}{cells}")
+
+    for i in range(len(objset)):
+        for j in range(i + 1, len(objset)):
+            if abs(rho[i, j]) > 0.9999:
+                run.log(f"  WARNING {objset.names[i]} and {objset.names[j]} are "
+                        f"perfectly rank-correlated here; the front will match "
+                        f"a run without one of them")
+    for msg in check_redundancy(objset):
+        run.log(f"  WARNING {msg}")
 
 
 # -- main loop --------------------------------------------------------------
@@ -119,23 +180,26 @@ def run_search(problem, cfg, run, resume_from: str | None = None):
     rng = np.random.default_rng(cfg.search.seed)
     genome = comp.genome
 
-    fp16, baselines = (baseline_sweep(problem, run)
-                       if cfg.search.baseline_sweep else (None, []))
-    problem.n_baseline_evals = comp.n_evals
+    objset = problem.objectives
+    run.log("\n" + objset.describe())
 
-    xlim, ylim = derive_limits(comp, cfg, [b[1] for b in baselines], fp16)
-    run.log(f"\nfrozen plot box: bpw {xlim[0]:.2f}-{xlim[1]:.2f}  "
-            f"ppl {ylim[0]:.2f}-{ylim[1]:.2f} ({cfg.plot.yscale})")
-    # Persist it: a later replot must reuse the identical box, or its frames
-    # will not be comparable with the ones written during the run.
-    with open(run.file("data", "plot_box.json"), "w") as f:
-        json.dump({"xlim": list(xlim), "ylim": list(ylim),
-                   "yscale": cfg.plot.yscale, "fp16_ppl": fp16,
-                   "baselines": [list(b) for b in baselines]}, f, indent=2)
-    plotter = (ParetoPlotter(run, cfg, xlim, ylim, fp16, baselines)
+    fp16, baselines, measured = (baseline_sweep(problem, run)
+                                 if cfg.search.baseline_sweep
+                                 else (None, [], []))
+    problem.n_baseline_evals = comp.n_evals
+    _log_objective_correlations(run, objset, measured)
+
+    bounds = derive_bounds(comp, cfg, objset, measured, fp16)
+    xlim = _axis(bounds[1])
+    ylim = _axis(bounds[0])
+    run.log(f"\nfrozen plot box: {objset[1].name} {xlim[0]:.2f}-{xlim[1]:.2f}  "
+            f"{objset[0].name} {ylim[0]:.2f}-{ylim[1]:.2f} ({cfg.plot.yscale})")
+    _save_box(run, cfg, objset, bounds, fp16, baselines)
+    plotter = (ParetoPlotter(run, cfg, xlim, ylim, fp16, baselines,
+                             objset=objset, bounds=bounds)
                if cfg.plot.enabled else None)
-    hv = hv_indicator(xlim, ylim, cfg.plot.yscale)
-    _log_hv_reference(run, hv, fp16, baselines, cfg)
+    hv = hv_indicator_nd(bounds, [s.log for s in objset], objset.names)
+    _log_hv_reference(run, hv, fp16, baselines, cfg, objset)
 
     if resume_from:
         with open(resume_from, "rb") as f:
@@ -161,9 +225,12 @@ def run_search(problem, cfg, run, resume_from: str | None = None):
         algorithm.setup(problem, termination=("n_gen", cfg.search.n_gen),
                         seed=cfg.search.seed, verbose=False)
 
-    run.log(f"\n{'gen':>5}{'evals':>8}{'|front|':>9}{'best ppl':>12}"
-            f"{'min bpw':>10}{'HV':>9}{'sec':>8}")
-    run.log("-" * 61)
+    # One column per objective, so a 3-objective run reports its third axis
+    # instead of silently optimising something the log never mentions.
+    heads = [f"best {s.name}"[:11] for s in objset]
+    run.log(f"\n{'gen':>5}{'evals':>8}{'|front|':>9}"
+            + "".join(h.rjust(13) for h in heads) + f"{'HV':>9}{'sec':>8}")
+    run.log("-" * (31 + 13 * len(heads) + 17))
 
     history, records = [], []
     while algorithm.has_next():
@@ -174,33 +241,48 @@ def run_search(problem, cfg, run, resume_from: str | None = None):
         # frame is gen_0001.
         gen = len(records) + 1
 
-        F_pop = algorithm.pop.get("F")
         X_pop = algorithm.pop.get("X")
-        F_front = algorithm.opt.get("F")
         X_front = algorithm.opt.get("X")
+        # Everything below here is REAL space: the sign flip that makes a
+        # maximised objective minimisable belongs to pymoo, not to the log,
+        # the figures or the stored front.
+        F_pop = objset.to_real(algorithm.pop.get("F"))
+        F_front = objset.to_real(algorithm.opt.get("F"))
         hv_now = hv(F_front)
         dt = time.perf_counter() - t0
 
+        best = {s.name: (float(np.min(F_front[:, j])) if s.sense == 1
+                         else float(np.max(F_front[:, j])))
+                for j, s in enumerate(objset)}
+        worst = {s.name: (float(np.max(F_front[:, j])) if s.sense == 1
+                          else float(np.min(F_front[:, j])))
+                 for j, s in enumerate(objset)}
         rec = {
             "gen": gen,
             "n_eval": comp.n_evals,
             "n_front": int(len(F_front)),
-            "best_ppl": float(np.min(F_front[:, 0])),
-            "min_bpw": float(np.min(F_front[:, 1])),
-            "max_bpw": float(np.max(F_front[:, 1])),
+            "objectives": list(objset.names),
+            "best": best,
+            "worst": worst,
             "hypervolume": hv_now,
             "seconds": round(dt, 2),
-            "front": [[float(a), float(b)] for a, b in F_front],
+            "front": [[float(v) for v in row] for row in F_front],
         }
+        # Kept so the existing readers of generations.jsonl keep working.
+        rec["best_ppl"] = best.get(objset[0].name)
+        rec["min_bpw"] = best.get(objset[1].name)
+        rec["max_bpw"] = worst.get(objset[1].name)
         records.append(rec)
         run.jsonl("generations", rec)
         run.log(f"{gen:>5}{comp.n_evals:>8}{len(F_front):>9}"
-                f"{rec['best_ppl']:>12.3f}{rec['min_bpw']:>10.2f}"
-                f"{hv_now:>9.4f}{dt:>8.1f}", echo=True)
+                + "".join(f"{best[s.name]:>13.3f}" for s in objset)
+                + f"{hv_now:>9.4f}{dt:>8.1f}", echo=True)
 
         if cfg.log.save_history:
+            # X and F stay in the algorithm's own space so a checkpoint and its
+            # history describe the same numbers.
             history.append({"gen": gen, "X": np.asarray(X_pop, dtype=float),
-                            "F": np.asarray(F_pop, dtype=float)})
+                            "F": np.asarray(algorithm.pop.get("F"), dtype=float)})
 
         if plotter and (gen % cfg.plot.every == 0):
             plotter.frame(gen, F_pop, F_front, comp.n_evals, hv_now)
@@ -213,30 +295,36 @@ def run_search(problem, cfg, run, resume_from: str | None = None):
     _checkpoint(algorithm, run, len(records), latest_only=True)
 
     if plotter and cfg.plot.refit_at_end:
-        new_ylim = _refit_box(records, history, ylim, cfg)
-        if new_ylim is not None:
-            run.log(f"refitting y box [{ylim[0]:,.2f}, {ylim[1]:,.2f}] -> "
-                    f"[{new_ylim[0]:,.2f}, {new_ylim[1]:,.2f}] "
-                    f"and re-rendering {len(records)} frames")
-            ylim = new_ylim
-            with open(run.file("data", "plot_box.json"), "w") as f:
-                json.dump({"xlim": list(xlim), "ylim": list(ylim),
-                           "yscale": cfg.plot.yscale, "fp16_ppl": fp16,
-                           "baselines": [list(b) for b in baselines]}, f, indent=2)
-            plotter = ParetoPlotter(run, cfg, xlim, ylim, fp16, baselines)
-            hv = hv_indicator(xlim, ylim, cfg.plot.yscale)
-            run.log(f"  hypervolume reference moved: ideal ppl is now "
-                    f"{hv.ideal[0]:,.2f}; every HV below is on the new box")
+        seen = [np.array(r["front"], dtype=float) for r in records]
+        seen += [objset.to_real(h["F"]) for h in history]
+        new_bounds = refit_bounds(bounds, objset, cfg,
+                                  np.vstack(seen) if seen else np.empty((0, len(objset))))
+        if new_bounds is not None:
+            moved = [f"{s.name} [{bounds[j][0]:,.2f}, {bounds[j][1]:,.2f}] -> "
+                     f"[{new_bounds[j][0]:,.2f}, {new_bounds[j][1]:,.2f}]"
+                     for j, s in enumerate(objset)
+                     if new_bounds[j] != bounds[j]]
+            run.log(f"refitting the box and re-rendering {len(records)} frames")
+            for m in moved:
+                run.log(f"  {m}")
+            bounds = new_bounds
+            xlim, ylim = _axis(bounds[1]), _axis(bounds[0])
+            _save_box(run, cfg, objset, bounds, fp16, baselines)
+            plotter = ParetoPlotter(run, cfg, xlim, ylim, fp16, baselines,
+                                    objset=objset, bounds=bounds)
+            hv = hv_indicator_nd(bounds, [s.log for s in objset], objset.names)
+            run.log(f"  hypervolume reference moved: ideal {objset[0].name} is "
+                    f"now {hv.ideal[0]:,.2f}; every HV below is on the new box")
             for i, rec in enumerate(records):
                 front = np.array(rec["front"], dtype=float)
-                pop = history[i]["F"] if i < len(history) else front
+                pop = objset.to_real(history[i]["F"]) if i < len(history) else front
                 rec["hypervolume"] = hv(front)
                 if rec["gen"] % cfg.plot.every == 0:
                     plotter.frame(rec["gen"], pop, front, rec["n_eval"],
                                   rec["hypervolume"])
 
     if plotter:
-        F_front = np.atleast_2d(res.F)
+        F_front = objset.to_real(np.atleast_2d(res.F))
         plotter.frame(len(records), F_front, F_front, comp.n_evals,
                       hv(F_front), stem=run.file("figures", "pareto_final"))
         plotter.convergence([r["gen"] for r in records],
@@ -250,26 +338,52 @@ def run_search(problem, cfg, run, resume_from: str | None = None):
     return res, records
 
 
-def _log_hv_reference(run, hv, fp16, baselines, cfg):
+def _axis(bound):
+    """(ideal, nadir) -> an increasing (lo, hi) matplotlib can take."""
+    return (min(bound), max(bound))
+
+
+def _save_box(run, cfg, objset, bounds, fp16, baselines):
+    """Persist the frozen box.
+
+    A later replot must reuse the identical box or its frames will not be
+    comparable with the ones written during the run. `objectives` and `bounds`
+    are what a 3-objective reader needs; `xlim`/`ylim` are kept alongside so
+    tools written against the 2-objective layout keep working.
+    """
+    xlim, ylim = _axis(bounds[1]), _axis(bounds[0])
+    with open(run.file("data", "plot_box.json"), "w") as f:
+        json.dump({
+            "objectives": list(objset.names),
+            "senses": [int(s.sense) for s in objset],
+            "bounds": [list(b) for b in bounds],   # (ideal, nadir) per objective
+            "xlim": list(xlim), "ylim": list(ylim),
+            "yscale": cfg.plot.yscale, "fp16_ppl": fp16,
+            "baselines": [list(b) for b in baselines],
+        }, f, indent=2)
+
+
+def _log_hv_reference(run, hv, fp16, baselines, cfg, objset):
     """Print the reference points hypervolume is measured against.
 
     HV is meaningless without stating its reference: the same front scores
     differently under a different box. Everything here is read off the
     indicator object itself, so the printout cannot drift from the maths.
     """
-    ref_ppl, ref_bpw = hv.ref_point
-    id_ppl, id_bpw = hv.ideal
-    axis = "log10" if hv.yscale == "log" else "linear"
-
     run.log("\nhypervolume reference")
-    run.log(f"  objective 1  proxy perplexity   {id_ppl:>12,.2f} .. "
-            f"{ref_ppl:>12,.2f}   ({axis})")
-    run.log(f"  objective 2  bits per weight    {id_bpw:>12.3f} .. "
-            f"{ref_bpw:>12.3f}")
-    run.log(f"  reference point (worst corner)  ppl {ref_ppl:,.2f}, "
-            f"bpw {ref_bpw:.3f}  ->  (1.0, 1.0) normalised")
-    run.log(f"  ideal point     (best corner)   ppl {id_ppl:,.2f}, "
-            f"bpw {id_bpw:.3f}  ->  (0.0, 0.0) normalised")
+    for j, spec in enumerate(objset):
+        ideal, nadir = hv.ideal[j], hv.ref_point[j]
+        axis = "  (log10)" if spec.log else ""
+        arrow = "min" if spec.sense == 1 else "MAX"
+        run.log(f"  objective {j + 1}  {spec.name:<22} {arrow}  "
+                f"{ideal:>12,.3f} .. {nadir:>12,.3f}{axis}")
+    corner = ", ".join(f"{n} {v:,.3f}"
+                       for n, v in zip(objset.names, hv.ref_point))
+    ideal = ", ".join(f"{n} {v:,.3f}" for n, v in zip(objset.names, hv.ideal))
+    ones = ", ".join(["1.0"] * len(objset))
+    zeros = ", ".join(["0.0"] * len(objset))
+    run.log(f"  reference point (worst corner)  {corner}  ->  ({ones}) normalised")
+    run.log(f"  ideal point     (best corner)   {ideal}  ->  ({zeros}) normalised")
 
     run.log(f"  y lower: {_bound_origin(cfg.plot.ylim_min, cfg.plot.ylim_min_ratio, fp16, 'lowest reference')}")
     run.log(f"  y upper: {_bound_origin(cfg.plot.ylim_max, cfg.plot.ylim_max_ratio, fp16, 'highest reference')}")
@@ -278,7 +392,8 @@ def _log_hv_reference(run, hv, fp16, baselines, cfg):
         hi = max(baselines, key=lambda b: b[0])
         run.log(f"                bpw span from uniform K={lo[2]} "
                 f"({lo[0]:.3f} bpw) to K={hi[2]} ({hi[0]:.3f} bpw), +5% pad")
-        off = [b for b in baselines if not (id_ppl <= b[1] <= ref_ppl)]
+        y0, y1 = _axis(hv.bounds[0])
+        off = [b for b in baselines if not (y0 <= b[1] <= y1)]
         if off:
             run.log(f"  note: {len(off)} baseline point(s) lie outside the box "
                     f"(K={', '.join(str(b[2]) for b in off)}) and are clipped "
@@ -398,26 +513,42 @@ def _checkpoint(algorithm, run, gen, latest_only=False):
 # -- outputs ----------------------------------------------------------------
 
 def save_front(res, problem, cfg, run):
-    """Write the final front as both JSON (full genomes) and CSV (a table)."""
+    """Write the final front as both JSON (full genomes) and CSV (a table).
+
+    Objective values are written in REAL space under their own names, so a
+    maximised objective appears as the ratio it is rather than as a negative
+    number nobody can interpret three months later.
+    """
+    objset = problem.objectives
+    n_obj = objset.n_obj
     X = np.atleast_2d(res.X) if res.X is not None else np.zeros((0, problem.n_var))
-    F = np.atleast_2d(res.F) if res.F is not None else np.zeros((0, 2))
+    F = np.atleast_2d(res.F) if res.F is not None else np.zeros((0, n_obj))
+    F = objset.to_real(F) if len(F) else F
+    # Sorted along objective 1, the size axis, which is what makes the CSV
+    # readable as a trade-off table.
     order = np.argsort(F[:, 1]) if len(F) else []
 
     front, rows = [], []
     for rank, i in enumerate(order):
         cost = problem.compressor.cost_only(X[i])
         settings = problem.compressor.genome.decode(X[i])
+        values = {n: float(F[i, j]) for j, n in enumerate(objset.names)}
         front.append({
             "rank": rank,
             "x": X[i].tolist(),
-            "ppl_proxy": float(F[i, 0]),
+            "objectives": values,
+            # Kept for readers written against the 2-objective layout.
+            "ppl_proxy": values.get(objset[0].name, float(F[i, 0])),
             "bpw_objective": float(F[i, 1]),
             "settings": {n: {"k": s.k, "t_lo": round(s.t_lo, 4),
                              "t_hi": round(s.t_hi, 4)}
                          for n, s in settings.items()},
             "estimated": cost.summary(),
         })
-        rows.append({"rank": rank, "ppl_proxy": round(float(F[i, 0]), 4),
+        rows.append({"rank": rank,
+                     **{f"f{j + 1}_{n}": round(float(F[i, j]), 5)
+                        for j, n in enumerate(objset.names)},
+                     "ppl_proxy": round(float(F[i, 0]), 4),
                      "bpw_objective": round(float(F[i, 1]), 4),
                      **{k: round(v, 5) for k, v in cost.summary().items()}})
 

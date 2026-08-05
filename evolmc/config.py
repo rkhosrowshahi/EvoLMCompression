@@ -132,7 +132,25 @@ class SearchConfig:
     max_bpw: float | None = None
     # Objective 2: "bpw_target" matches what GPTQ/AWQ papers quote;
     # "bpw_model" is the honest whole-checkpoint number.
+    #
+    # Subsumed by `objectives` below, which is what the search actually reads.
+    # Still used to pick the bpw measure the frozen x box and the baseline
+    # sweep's printout are derived from, so keep it equal to whichever bpw_*
+    # appears in `objectives` or the axes will not line up with the points.
     size_objective: Literal["bpw_target", "bpw_model"] = "bpw_target"
+    # What the search optimises, in order. Names come from
+    # objectives.REGISTRY: `ppl_proxy` plus any key of ModelCost.summary().
+    # Direction is a property of the name, not of the list -- the cr_* ratios
+    # are maximised, everything else minimised.
+    #
+    # Order drives the figures: objective 0 is the y axis, objective 1 the x
+    # axis, objective 2 (when present) the point color.
+    #
+    # The default reproduces the original two-objective problem exactly.
+    # Beware pairing two size measures built from the same bit total, e.g.
+    # bpw_model with cr_deployable: those are monotone transforms of one
+    # another and add nothing. See objectives.check_redundancy.
+    objectives: tuple[str, ...] = ("ppl_proxy", "bpw_target")
     # How generation 0 is built.
     #   "linspace" -- pop_size uniform-K individuals, K spread evenly in log
     #                 space across the whole range. Generation 0 then lies

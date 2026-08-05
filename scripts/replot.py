@@ -29,7 +29,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import numpy as np  # noqa: E402
 
 from evolmc.config import Config  # noqa: E402
-from evolmc.plotting import ParetoPlotter, hv_indicator, latex_snippet  # noqa: E402
+from evolmc.objectives import from_box  # noqa: E402
+from evolmc.plotting import (  # noqa: E402
+    ParetoPlotter, hv_indicator_nd, latex_snippet,
+)
 from evolmc.rundir import RunDir, find_run  # noqa: E402
 from evolmc.video import make_video  # noqa: E402
 
@@ -125,8 +128,14 @@ def main():
     run = _Run()
     os.makedirs(run.file("figures", "pareto"), exist_ok=True)
 
+    objset, bounds = from_box(box, cfg.search.size_objective)
     xlim, ylim = tuple(box["xlim"]), tuple(box["ylim"])
     pops = load_populations(run_path, len(gens))
+    # history.npz holds the algorithm's minimisation vectors; the stored fronts
+    # and everything drawn below are real-space. Convert once, here, or a
+    # maximised objective plots as a negative number against a positive axis.
+    if pops is not None:
+        pops = [objset.to_real(F) for F in pops]
 
     if args.fit_box:
         # The run freezes its box from the reference points alone, before any
@@ -158,14 +167,23 @@ def main():
     ylim = _check_ylim(ylim, cfg.plot.yscale)
 
     baselines = [tuple(b) for b in box["baselines"]]
-    plotter = ParetoPlotter(run, cfg, xlim, ylim, box.get("fp16_ppl"), baselines)
-    hv = hv_indicator(xlim, ylim, cfg.plot.yscale)
+    # --ylim/--xlim and --fit-box move the two drawn axes; fold them back into
+    # the objective bounds so the figure box and the HV box stay one box.
+    bounds = list(bounds)
+    bounds[0] = (ylim[0], ylim[1]) if objset[0].sense == 1 else (ylim[1], ylim[0])
+    bounds[1] = (xlim[0], xlim[1]) if objset[1].sense == 1 else (xlim[1], xlim[0])
+    plotter = ParetoPlotter(run, cfg, xlim, ylim, box.get("fp16_ppl"), baselines,
+                            objset=objset, bounds=bounds)
+    hv = hv_indicator_nd(bounds, [s.log for s in objset], objset.names)
 
     print(f"run     {run_path}")
     print(f"figure  {plotter.figsize[0]:.2f} x {plotter.figsize[1]:.2f} in"
           f"  ({cfg.plot.venue}, {', '.join(cfg.plot.formats)})")
-    print(f"box     bpw {xlim[0]:.2f}-{xlim[1]:.2f}  "
-          f"ppl {ylim[0]:.2f}-{ylim[1]:.2f}")
+    print(f"box     {objset[1].name} {xlim[0]:.2f}-{xlim[1]:.2f}  "
+          f"{objset[0].name} {ylim[0]:.2f}-{ylim[1]:.2f}")
+    if len(objset) > 2:
+        print(f"color   {objset[2].name} "
+              f"{min(bounds[2]):.3f}-{max(bounds[2]):.3f}")
     if not args.no_frames:
         for i, g in enumerate(gens):
             front = np.array(g["front"], dtype=float)

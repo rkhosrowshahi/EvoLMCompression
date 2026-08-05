@@ -50,6 +50,10 @@ def main():
                     choices=["none", "ieee", "acm", "neurips", "icml", "lncs"],
                     help="also exercise the paper-figure path at this venue")
     ap.add_argument("--usetex", action="store_true")
+    ap.add_argument("--objectives", default=None,
+                    help="comma-separated objective names, e.g. "
+                         "ppl_proxy,bpw_target,cr_archival. Default is the "
+                         "two-objective problem.")
     args = ap.parse_args()
 
     device = ("cuda" if torch.cuda.is_available()
@@ -63,10 +67,15 @@ def main():
         "prune": {"enabled": True, "t_max": 1.0},
         "variables": {"k_grouping": "type", "prune_grouping": "global"},
         "data": {"seqlen": args.seqlen, "n_proxy_seq": 4, "n_eval_seq": 8},
-        "search": {"pop_size": 8, "n_gen": args.gens},
+        "search": {"pop_size": 8, "n_gen": args.gens,
+                   **({"objectives": [s.strip() for s in
+                                      args.objectives.split(",")]}
+                      if args.objectives else {})},
         "log": {"root": "logs",
-                "run_name": "smoke-test" + ("" if args.venue == "none"
-                                            else f"-{args.venue}")},
+                "run_name": "smoke-test"
+                            + ("" if args.venue == "none" else f"-{args.venue}")
+                            + ("" if not args.objectives
+                               else f"-{len(args.objectives.split(','))}obj")},
         "plot": {"every": 1, "venue": args.venue,
                  "usetex": args.usetex},
     })
@@ -118,9 +127,11 @@ def main():
     n = comp.n_evals
     print(f"\n{n} evaluations in {dt:.1f}s -> {dt/max(n,1):.2f}s each")
     print(f"cache: {comp.cache.hits} hits / {comp.cache.misses} misses")
-    print("\nfinal front (ppl, bpw):")
-    for f in sorted(res.F.tolist(), key=lambda r: r[1]):
-        print(f"  ppl {f[0]:9.3f}   bpw {f[1]:5.2f}")
+    objset = problem.objectives
+    print(f"\nfinal front ({', '.join(objset.names)}):")
+    for f in sorted(objset.to_real(res.F).tolist(), key=lambda r: r[1]):
+        print("  " + "   ".join(f"{n} {v:9.3f}"
+                                for n, v in zip(objset.names, f)))
     print(f"\nrun directory: {run.path}")
     for root, _, files in sorted(os.walk(run.path)):
         rel = os.path.relpath(root, run.path)

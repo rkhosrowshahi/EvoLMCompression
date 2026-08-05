@@ -4,3 +4,4 @@ __pycache__/
 logs/
 *.egg-info/
 .pytest_cache/
+presentation/

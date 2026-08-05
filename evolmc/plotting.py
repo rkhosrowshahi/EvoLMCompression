@@ -287,12 +287,34 @@ def _check_ylim(ylim, yscale):
 
 
 class ParetoPlotter:
-    def __init__(self, run, cfg, xlim, ylim, fp16_ppl=None, baselines=None):
+    """Per-generation frames, drawn from REAL-space objective values.
+
+    Callers convert pymoo's minimisation vectors with `ObjectiveSet.to_real`
+    first, so a maximised objective is drawn and labelled in the units it is
+    reported in rather than as a negative number.
+
+    With three or more objectives the frame stays 2-D and projects: objective 0
+    on y, objective 1 on x, objective 2 as the point color, on a frozen scale
+    so frames stay comparable. The front is then drawn as a scatter rather than
+    a connected curve, because a 3-objective front is a surface and joining its
+    members in bpw order would draw a line through points that do not lie on
+    one. Objectives past the third are optimised but not drawn.
+    """
+
+    def __init__(self, run, cfg, xlim, ylim, fp16_ppl=None, baselines=None,
+                 objset=None, bounds=None):
         self.run = run
         self.cfg = cfg.plot
         self.xlim = xlim
         self.ylim = ylim
         self.fp16_ppl = fp16_ppl
+        self.objset = objset
+        self.cspec = objset[2] if (objset is not None and len(objset) > 2) else None
+        # Frozen color scale, or the frames flicker as the population moves.
+        self.clim = None
+        if self.cspec is not None and bounds is not None:
+            ideal, nadir = bounds[2]
+            self.clim = (min(ideal, nadir), max(ideal, nadir))
         # baselines: list of (bpw, ppl, K) for the uniform-K reference line
         self.baselines = sorted(baselines or [], key=lambda r: r[0])
         self.theme = THEMES[self.cfg.style]
@@ -312,9 +334,17 @@ class ParetoPlotter:
         self.annot_pt = (cfg.plot.annotation_pt if cfg.plot.annotation_pt
                          else max(self.base_pt - 3.0, 3.5))
         # Which measure this is (bpw_target vs bpw_model) is set by
-        # search.size_objective and recorded in the run's config; state it in
-        # the figure caption rather than crowding the axis.
-        self.xlabel = "bits per weight"
+        # search.size_objective and recorded in the run's config. With an
+        # explicit objective list the scope is named on the axis instead: f2
+        # and f3 can cover different weight sets, so a reader who assumes one
+        # scope will try to reconcile 16/f2 against f3 and conclude the
+        # accounting is broken.
+        if objset is not None:
+            self.ylabel_base = objset[0].axis_label
+            self.xlabel = objset[1].axis_label
+        else:
+            self.ylabel_base = "proxy perplexity"
+            self.xlabel = "bits per weight"
 
     # -- one generation ----------------------------------------------------
 
@@ -364,12 +394,25 @@ class ParetoPlotter:
                     label=self.cfg.baseline_label)
             self._label_baselines(ax, pt)
 
+        mappable = None
         if len(F_front):
             order = np.argsort(F_front[:, 1])
             f = F_front[order]
-            ax.plot(f[:, 1], f[:, 0], lw=1.4, color=t["front"], marker="o",
-                    ms=self.marker_pt, mfc=t["front"], mec=t["surface"],
-                    mew=0.8, zorder=5, label="Pareto front (NSGA-II)")
+            if self.cspec is None:
+                ax.plot(f[:, 1], f[:, 0], lw=1.4, color=t["front"], marker="o",
+                        ms=self.marker_pt, mfc=t["front"], mec=t["surface"],
+                        mew=0.8, zorder=5, label="Pareto front (NSGA-II)")
+            else:
+                # No connecting line: with a third objective the front is a
+                # surface, and joining its members in x order draws a curve
+                # through points that are not neighbours on it.
+                inside = self._mask_inside(f[:, 1], f[:, 0])
+                mappable = ax.scatter(
+                    f[inside, 1], f[inside, 0], c=f[inside, 2],
+                    cmap="viridis", vmin=self.clim[0], vmax=self.clim[1],
+                    s=(self.marker_pt + 1) ** 2, lw=0.4,
+                    edgecolors=t["surface"], zorder=5,
+                    label="Pareto front (NSGA-II)")
             drawn.append(f)
 
         # Count *distinct* candidates outside the box. The front is a subset of
@@ -381,6 +424,14 @@ class ParetoPlotter:
             off = int((~self._mask_inside(pts[:, 1], pts[:, 0])).sum())
 
         self._finish(ax, gen, n_evals, hv, off, minimal)
+        if mappable is not None:
+            cb = fig.colorbar(mappable, ax=ax, pad=0.02, fraction=0.046)
+            cb.set_label(self.cspec.axis_label, fontsize=pt - 1,
+                         color=t["ink_2"])
+            cb.ax.tick_params(labelsize=pt - 2, colors=t["muted"], length=2,
+                              width=0.5)
+            cb.outline.set_edgecolor(t["axis"])
+            cb.outline.set_linewidth(0.6)
         # A per-generation frame goes into the video, so it needs a fixed
         # canvas; an explicit stem means a standalone figure, which does not.
         return self._save(fig, stem or self.run.frame(gen),
@@ -474,7 +525,8 @@ class ParetoPlotter:
         ax.set_ylim(*self.ylim)
         ax.set_yscale(self.cfg.yscale)
         ax.set_xlabel(self.xlabel, fontsize=pt, color=t["ink_2"])
-        ax.set_ylabel("proxy perplexity" + (" (log)" if self.cfg.yscale == "log" else ""),
+        ax.set_ylabel(self.ylabel_base
+                      + (" (log)" if self.cfg.yscale == "log" else ""),
                       fontsize=pt, color=t["ink_2"])
 
         if not minimal:
@@ -579,40 +631,174 @@ class ParetoPlotter:
         return written
 
 
-def hv_indicator(xlim, ylim, yscale="log"):
-    """Hypervolume on objectives normalised into the frozen axis box.
+def hv_indicator_nd(bounds, logs=None, names=None):
+    """Hypervolume over any number of objectives, on REAL-space values.
 
-    Using the plot box as the reference frame means HV is bounded in [0, 1] and
-    directly comparable across models, which raw-perplexity HV is not. The
-    reference point is the box's worst corner -- (ylim[1], xlim[1]) in real
-    units, (1, 1) once normalised.
+    `bounds` is one (ideal, nadir) pair per objective, in that objective's own
+    units and direction: `ideal` is the best corner and `nadir` the worst, so a
+    maximised objective simply has ideal > nadir and needs no sign flips here.
+    That is what lets callers hand this function the same real-valued arrays
+    they plot and report, instead of pymoo's internal minimisation vectors.
 
-    The returned callable carries `.ref_point`, `.ideal`, `.xlim`, `.ylim` and
-    `.yscale` so anything reporting the reference reads it off the object that
-    actually computes the number, rather than re-deriving it and drifting.
+    Normalising by the frozen box means HV is bounded in [0, 1] and comparable
+    across models, which raw-perplexity HV is not.
+
+    The returned callable carries `.ref_point`, `.ideal`, `.bounds`, `.logs`
+    and `.names`, so anything reporting the reference reads it off the object
+    that computes the number rather than re-deriving it and drifting.
     """
     from pymoo.indicators.hv import HV
 
-    ind = HV(ref_point=np.array([1.0, 1.0]))
-    y0, y1 = (np.log10(ylim[0]), np.log10(ylim[1])) if yscale == "log" else ylim
-    x0, x1 = xlim
+    bounds = [(float(a), float(b)) for a, b in bounds]
+    m = len(bounds)
+    logs = list(logs) if logs is not None else [False] * m
+    if len(logs) != m:
+        raise ValueError(f"got {m} bounds but {len(logs)} log flags")
+    ind = HV(ref_point=np.ones(m))
+
+    # Pre-transform the box once. On a log objective the whole normalisation
+    # happens in log space, so the padding reads evenly across decades.
+    prepped = []
+    for (ideal, nadir), lg in zip(bounds, logs):
+        if lg:
+            ideal = math.log10(max(ideal, 1e-12))
+            nadir = math.log10(max(nadir, 1e-12))
+        prepped.append((ideal, nadir))
 
     def compute(F):
         F = np.atleast_2d(np.asarray(F, dtype=float))
+        if F.size == 0:
+            return 0.0
+        if F.shape[1] != m:
+            raise ValueError(
+                f"hypervolume is defined on {m} objectives but got "
+                f"{F.shape[1]} columns"
+            )
         F = F[np.isfinite(F).all(axis=1)]
         if not len(F):
             return 0.0
-        y = np.log10(np.clip(F[:, 0], 1e-12, None)) if yscale == "log" else F[:, 0]
-        norm = np.stack([
-            np.clip((y - y0) / max(y1 - y0, 1e-12), 0, 1),
-            np.clip((F[:, 1] - x0) / max(x1 - x0, 1e-12), 0, 1),
-        ], axis=1)
-        return float(ind(norm))
+        cols = []
+        for j, ((ideal, nadir), lg) in enumerate(zip(prepped, logs)):
+            v = np.log10(np.clip(F[:, j], 1e-12, None)) if lg else F[:, j]
+            # 0 at the ideal corner, 1 at the nadir, whichever way they order.
+            cols.append(np.clip((v - ideal) / _nz(nadir - ideal), 0, 1))
+        return float(ind(np.stack(cols, axis=1)))
 
-    compute.ref_point = (float(ylim[1]), float(xlim[1]))   # worst corner (ppl, bpw)
-    compute.ideal = (float(ylim[0]), float(xlim[0]))       # best corner (ppl, bpw)
-    compute.xlim, compute.ylim, compute.yscale = tuple(xlim), tuple(ylim), yscale
+    compute.ref_point = tuple(b[1] for b in bounds)   # worst corner, real units
+    compute.ideal = tuple(b[0] for b in bounds)       # best corner, real units
+    compute.bounds = tuple(bounds)
+    compute.logs = tuple(logs)
+    compute.names = tuple(names) if names else tuple(f"f{i+1}" for i in range(m))
     return compute
+
+
+def _nz(x, eps=1e-12):
+    """Keep a degenerate box from dividing by zero without flipping its sign."""
+    return x if abs(x) > eps else (eps if x >= 0 else -eps)
+
+
+def hv_indicator(xlim, ylim, yscale="log"):
+    """Two-objective hypervolume, in the original (ppl, bpw) column order.
+
+    Thin wrapper over `hv_indicator_nd` kept because the comparison script and
+    every stored 2-objective run speak this signature. Both objectives are
+    minimised, so real space and pymoo's minimisation space coincide and the
+    stored fronts can be passed straight in.
+    """
+    hv = hv_indicator_nd([(ylim[0], ylim[1]), (xlim[0], xlim[1])],
+                         logs=[yscale == "log", False],
+                         names=("ppl_proxy", "bpw"))
+    hv.xlim, hv.ylim, hv.yscale = tuple(xlim), tuple(ylim), yscale
+    return hv
+
+
+def derive_bounds(compressor, cfg, objset, baseline_rows=None, fp16_ppl=None):
+    """A frozen (ideal, nadir) box for every objective in `objset`.
+
+    Perplexity and the bpw axis reuse `derive_limits`, so the explicit
+    `plot.xlim_*` / `plot.ylim_*` controls keep working exactly as before and
+    the figure box and the HV box stay the same box.
+
+    Everything else is read off the reference sweep. `baseline_rows` are the
+    REAL cost summaries measured at each k_choice during the baseline sweep;
+    they are preferred over `cost_only` because that estimator assumes a flat
+    symbol histogram, which upper-bounds the archival cost and would put the
+    true archival values outside the box it derived.
+    """
+    ppls = [r.get("ppl_proxy") for r in (baseline_rows or [])]
+    ppls = [p for p in ppls if p and np.isfinite(p)]
+    xlim, ylim = derive_limits(compressor, cfg, ppls, fp16_ppl)
+
+    # Fall back to the flat-histogram estimate only when there was no sweep.
+    rows = list(baseline_rows or [])
+    if not rows:
+        genome = compressor.genome
+        for k in (min(genome.k_choices), max(genome.k_choices)):
+            rows.append(compressor.cost_only(genome.encode_uniform(k)).summary())
+
+    bounds = []
+    for spec in objset:
+        if spec.name == "ppl_proxy":
+            lo, hi = ylim
+        elif spec.name == cfg.search.size_objective:
+            lo, hi = xlim
+        else:
+            vals = [float(r[spec.name]) for r in rows
+                    if r.get(spec.name) is not None and np.isfinite(r[spec.name])]
+            if not vals:
+                raise KeyError(
+                    f"cannot derive bounds for objective {spec.name!r}: it is "
+                    "absent from the reference sweep"
+                )
+            lo, hi = min(vals), max(vals)
+            pad = 0.05 * (hi - lo) if hi > lo else max(abs(hi) * 0.05, 0.5)
+            lo, hi = lo - pad, hi + pad
+        # (ideal, nadir): best corner first, whichever direction that is.
+        bounds.append((lo, hi) if spec.sense == 1 else (hi, lo))
+    return bounds
+
+
+def refit_bounds(bounds, objset, cfg, seen):
+    """Reopen any objective's nadir so nothing evaluated sits outside the box.
+
+    Without this a candidate past the reference sweep is clipped to the worst
+    corner when scored and drawn on the spine when plotted. The perplexity axis
+    keeps its existing rules -- an explicit `plot.ylim_*` is an instruction, not
+    a starting guess, and is never moved. Returns None when nothing changed.
+    """
+    seen = np.atleast_2d(np.asarray(seen, dtype=float))
+    if seen.size == 0:
+        return None
+
+    out, changed = [], False
+    for j, spec in enumerate(objset):
+        ideal, nadir = bounds[j]
+        col = seen[:, j]
+        col = col[np.isfinite(col)]
+        if spec.log:
+            col = col[col > 0]
+        if not len(col):
+            out.append((ideal, nadir))
+            continue
+
+        if spec.name == "ppl_proxy":
+            # Mirrors _refit_box: the floor reopens when beaten, the ceiling
+            # only when it was never capped on purpose.
+            lo, hi = ideal, nadir
+            if cfg.plot.ylim_min is None and float(col.min()) < lo:
+                lo = max(float(col.min()) * cfg.plot.ylim_min_ratio, 1.0)
+            if (cfg.plot.ylim_max is None and cfg.plot.ylim_max_ratio is None
+                    and float(col.max()) > hi):
+                hi = float(col.max()) * 1.05
+            new = (lo, hi)
+        elif spec.sense == 1:
+            new = (ideal, max(nadir, float(col.max()) * 1.05))
+        else:
+            new = (ideal, min(nadir, float(col.min()) * 0.95))
+
+        changed |= new != (ideal, nadir)
+        out.append(new)
+    return out if changed else None
 
 
 # -- standalone evaluation figures -----------------------------------------

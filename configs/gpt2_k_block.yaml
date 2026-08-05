@@ -97,10 +97,10 @@ search:
   # instead silently mutates only 1/n_var of the population: 2% here at 48
   # variables, 0.1% for a per-layer Llama-2 encoding.
   crossover_prob: 0.9        # per mating pair
-  crossover_prob_var: 0.5    # per gene, given the pair crosses
+  crossover_prob_var: 1.0    # per gene, given the pair crosses
   crossover_eta: 15          # SBX spread; higher = children hug their parents
   mutation_prob: 1.0         # per individual
-  mutation_prob_var: null    # per gene; null -> 1/n_var
+  mutation_prob_var: 1.0    # per gene; null -> 1/n_var
   mutation_eta: 20           # PM spread; higher = smaller steps
   eliminate_duplicates: true
   n_offsprings: null         # null -> pop_size (generational)

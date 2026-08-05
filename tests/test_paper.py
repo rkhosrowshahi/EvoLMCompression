@@ -819,9 +819,10 @@ def test_x_bounds_override_the_derived_range():
 
 # -- the hypervolume reference printout ------------------------------------
 
-def _hv_log(**plot):
+def _hv_log(objectives=("ppl_proxy", "bpw_target"), **plot):
     """Run _log_hv_reference and return the lines it emitted."""
-    from evolmc.plotting import hv_indicator
+    from evolmc.objectives import ObjectiveSet
+    from evolmc.plotting import hv_indicator, hv_indicator_nd
     from evolmc.search import _log_hv_reference
 
     cfg = Config()
@@ -834,9 +835,16 @@ def _hv_log(**plot):
         def log(self, msg="", echo=True):
             lines.append(msg)
 
-    hv = hv_indicator((1.0, 13.0), (22.0, 1e8), cfg.plot.yscale)
+    objset = ObjectiveSet(objectives)
+    if len(objset) == 2:
+        hv = hv_indicator((1.0, 13.0), (22.0, 1e8), cfg.plot.yscale)
+    else:
+        # (ideal, nadir) per objective; cr_archival is maximised, so its ideal
+        # is the larger number.
+        hv = hv_indicator_nd([(22.0, 1e8), (1.0, 13.0), (3.2, 1.1)],
+                             [s.log for s in objset], objset.names)
     _log_hv_reference(Run(), hv, 27.675,
-                      [(2.0, 1.0e8, 4), (8.0, 58.7, 256)], cfg)
+                      [(2.0, 1.0e8, 4), (8.0, 58.7, 256)], cfg, objset)
     return "\n".join(lines)
 
 
@@ -861,3 +869,224 @@ def test_hv_reference_names_the_origin_that_actually_applied():
     capped = _hv_log(ylim_max=None, ylim_max_ratio=12.0)
     assert "12 x fp16" in capped
     assert "uncapped" not in capped
+
+
+def test_hv_reference_reports_every_objective_and_its_direction():
+    """A third objective the log never mentions is a third objective nobody
+    can check. Each line must also say which way the objective runs."""
+    out = _hv_log(objectives=("ppl_proxy", "bpw_target", "cr_archival"))
+    assert "objective 3  cr_archival" in out
+    assert "MAX" in out                    # cr_* is maximised
+    assert out.count("min") >= 2           # ppl and bpw are not
+    # The normalised corners must have one coordinate per objective.
+    assert "(1.0, 1.0, 1.0) normalised" in out
+    assert "(0.0, 0.0, 0.0) normalised" in out
+
+
+# -- objective set ---------------------------------------------------------
+
+def test_cr_objectives_are_maximised_and_round_trip():
+    from evolmc.objectives import ObjectiveSet
+
+    o = ObjectiveSet(("ppl_proxy", "bpw_target", "cr_archival"))
+    assert o.n_obj == 3
+    values = [42.0, 4.0, 2.5]
+    F = o.to_min(values)
+    # pymoo minimises, so the maximised ratio is stored negated ...
+    assert list(F) == [42.0, 4.0, -2.5]
+    # ... and never leaks that sign into anything user-facing.
+    assert list(o.to_real(F)) == values
+    back = o.to_real(np.array([F, F]))
+    assert back.shape == (2, 3) and back[1, 2] == pytest.approx(2.5)
+
+
+def test_objective_set_rejects_typos_and_duplicates():
+    from evolmc.objectives import ObjectiveSet
+
+    with pytest.raises(ValueError, match="unknown objective"):
+        ObjectiveSet(("ppl_proxy", "bpw_targt"))
+    with pytest.raises(ValueError, match="repeats"):
+        ObjectiveSet(("ppl_proxy", "bpw_target", "bpw_target"))
+    with pytest.raises(ValueError, match="at least 2"):
+        ObjectiveSet(("ppl_proxy",))
+
+
+def test_redundant_objective_pairs_are_flagged():
+    """The trap this whole mechanism exists to catch.
+
+    cr_deployable is exactly 16/bpw_model -- both normalise the same
+    target_bits_deployable -- so pairing them leaves dominance untouched and
+    burns a full search budget reproducing the 2-objective front.
+    """
+    from evolmc.objectives import ObjectiveSet, check_redundancy
+
+    bad = check_redundancy(ObjectiveSet(
+        ("ppl_proxy", "bpw_model", "cr_deployable")))
+    assert len(bad) == 1 and "deployable bit total" in bad[0]
+
+    # bpw_target is deployable too, so it is equally redundant with cr_deployable.
+    assert check_redundancy(ObjectiveSet(
+        ("ppl_proxy", "bpw_target", "cr_deployable")))
+
+    # Deployable against archival is the pairing that actually works.
+    assert check_redundancy(ObjectiveSet(
+        ("ppl_proxy", "bpw_target", "cr_archival"))) == []
+    assert check_redundancy(ObjectiveSet(("ppl_proxy", "bpw_target"))) == []
+
+
+def test_objective_labels_name_their_scope():
+    """bpw_target covers the projections, cr_archival the whole checkpoint, so
+    16/f2 does not equal f3. An axis that hides that invites the arithmetic."""
+    from evolmc.objectives import ObjectiveSet
+
+    o = ObjectiveSet(("ppl_proxy", "bpw_target", "cr_archival"))
+    assert o[1].axis_label == "bits per weight (target matrices)"
+    assert o[2].axis_label == "compression ratio, entropy-coded (full checkpoint)"
+    assert o[0].axis_label == "proxy perplexity"   # no scope to name
+
+
+# -- N-objective hypervolume -----------------------------------------------
+
+def test_hv_treats_maximised_objectives_by_their_corners():
+    """`bounds` carries (ideal, nadir), so a maximised objective needs no sign
+    flip: its ideal is simply the larger number."""
+    from evolmc.plotting import hv_indicator_nd
+
+    hv = hv_indicator_nd([(1.0, 10.0), (3.0, 1.0)], logs=[False, False])
+    # The ideal corner fills the box; the nadir corner fills none of it.
+    assert hv([[1.0, 3.0]]) == pytest.approx(1.0)
+    assert hv([[10.0, 1.0]]) == pytest.approx(0.0)
+    # A point better than the box on the maximised axis is clipped, not negative.
+    assert hv([[1.0, 99.0]]) == pytest.approx(1.0)
+
+
+def test_hv_rejects_a_front_with_the_wrong_number_of_objectives():
+    """Silently scoring a 3-objective front on a 2-objective box would produce
+    a plausible number that means nothing."""
+    from evolmc.plotting import hv_indicator_nd
+
+    hv = hv_indicator_nd([(1.0, 10.0), (1.0, 10.0)])
+    with pytest.raises(ValueError, match="3 columns"):
+        hv([[1.0, 2.0, 3.0]])
+
+
+def test_two_objective_hv_is_unchanged_by_the_nd_rewrite():
+    """The finished 2-objective runs must keep scoring identically."""
+    from evolmc.plotting import hv_indicator
+
+    hv = hv_indicator((1.0, 13.0), (22.0, 1e8), "log")
+    front = np.array([[100.0, 2.0], [50.0, 6.0], [30.0, 11.0]])
+    assert hv.ref_point == (1e8, 13.0)
+    assert hv.ideal == (22.0, 1.0)
+    assert 0.0 < hv(front) < 1.0
+    # Monotone: a dominating front must not score lower.
+    better = front.copy()
+    better[:, 0] *= 0.5
+    assert hv(better) > hv(front)
+
+
+# -- reference directions --------------------------------------------------
+
+def test_das_dennis_partitions_scale_with_objective_count():
+    """`pop_size - 1` partitions is a 2-objective rule. In 3-D it asks for
+    C(101, 2) = 5151 directions to steer 100 individuals, which gives
+    U-NSGA-III a niche per individual and collapses its selection pressure."""
+    import math
+
+    from evolmc.search import das_dennis_partitions
+
+    assert das_dennis_partitions(2, 100) == 99          # p + 1 = 100 directions
+    p = das_dennis_partitions(3, 100)
+    assert p == 13
+    assert math.comb(p + 2, 2) == 105                   # just covers pop_size
+    assert math.comb(p + 1, 2) < 100                    # and p-1 would not
+
+
+@pytest.mark.parametrize("name", ["unsga3", "moead"])
+def test_reference_direction_algorithms_build_at_three_objectives(name):
+    from evolmc.search import build_algorithm
+
+    g = _int_genome_for_algo()
+    cfg = Config()
+    cfg.search.algorithm = name
+    cfg.search.pop_size = 100
+    cfg.search.objectives = ("ppl_proxy", "bpw_target", "cr_archival")
+    algo = build_algorithm(cfg, g, np.zeros((100, g.n_var)))
+    assert algo.ref_dirs.shape[1] == 3
+    assert 100 <= len(algo.ref_dirs) <= 200
+
+
+def _int_genome_for_algo():
+    import torch
+
+    from evolmc.grouping import Genome
+    from evolmc.models import TargetLayer
+
+    layers = [TargetLayer(f"m.layers.{b}.q_proj", torch.nn.Linear(4, 4),
+                          4096 * 4096, 4096, 4096, b, "q_proj", False)
+              for b in range(3)]
+    cfg = Config()
+    cfg.prune.enabled = False
+    cfg.quant.granularity = "per_tensor"
+    return Genome(layers, cfg.quant, cfg.prune, cfg.variables)
+
+
+# -- bounds derivation and refit -------------------------------------------
+
+def _objset_comp():
+    class FakeCost:
+        def __init__(self, b):
+            self.bpw_target = self.bpw_model = b
+        def summary(self):
+            return {"bpw_target": self.bpw_target, "cr_archival": 16.0 / self.bpw_target}
+
+    class FakeGenome:
+        k_choices = (2, 8192)
+        def encode_uniform(self, k): return k
+
+    class FakeComp:
+        genome = FakeGenome()
+        def cost_only(self, k): return FakeCost(1.0 if k == 2 else 13.0)
+
+    return FakeComp()
+
+
+def test_bounds_put_the_ideal_corner_first_for_each_direction():
+    from evolmc.objectives import ObjectiveSet
+    from evolmc.plotting import derive_bounds
+
+    cfg = Config()
+    cfg.plot.ylim_min, cfg.plot.ylim_pad = 1.0, 0.0
+    objset = ObjectiveSet(("ppl_proxy", "bpw_target", "cr_archival"))
+    rows = [{"ppl_proxy": 17884.0, "bpw_target": 1.0, "cr_archival": 2.78},
+            {"ppl_proxy": 27.7, "bpw_target": 13.0, "cr_archival": 1.24}]
+    bounds = derive_bounds(_objset_comp(), cfg, objset, rows, fp16_ppl=27.675)
+
+    assert bounds[0][0] < bounds[0][1]      # ppl minimised: ideal is lower
+    assert bounds[1][0] < bounds[1][1]      # bpw minimised
+    assert bounds[2][0] > bounds[2][1]      # CR MAXIMISED: ideal is higher
+    assert bounds[2][0] > 2.78 and bounds[2][1] < 1.24   # padded outwards
+
+
+def test_refit_reopens_a_maximised_objective_in_its_own_direction():
+    from evolmc.objectives import ObjectiveSet
+    from evolmc.plotting import refit_bounds
+
+    cfg = Config()
+    cfg.plot.ylim_min = 1.0
+    objset = ObjectiveSet(("ppl_proxy", "bpw_target", "cr_archival"))
+    bounds = [(1.0, 500.0), (1.0, 13.0), (2.9, 1.2)]
+
+    # Nothing outside the box.
+    assert refit_bounds(bounds, objset, cfg,
+                        [[100.0, 4.0, 2.0]]) is None
+
+    # A candidate whose CR is WORSE than the nadir must push the nadir down,
+    # not up -- the direction is what a sign-blind implementation gets wrong.
+    out = refit_bounds(bounds, objset, cfg, [[100.0, 4.0, 0.9]])
+    assert out[2][0] == pytest.approx(2.9)          # ideal untouched
+    assert out[2][1] < 1.2 and out[2][1] <= 0.9
+
+    # An explicit perplexity floor is an instruction, not a starting guess.
+    out = refit_bounds(bounds, objset, cfg, [[0.5, 4.0, 2.0]])
+    assert out is None or out[0][0] == pytest.approx(1.0)

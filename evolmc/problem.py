@@ -1,14 +1,23 @@
 """The pymoo problem definition.
 
-Objectives (both minimised):
-  f1 = proxy perplexity on held-in calibration windows
-  f2 = bits per weight
+Which objectives are optimised is set by `search.objectives` and resolved
+through `objectives.ObjectiveSet`; see that module for the registry and the
+sign convention. The default list is
 
-bpw is used rather than -CR because it is linear in the thing the search
-actually controls and because every baseline in the literature is quoted in
-bits. CR is derived and logged alongside.
+  f1 = proxy perplexity on held-in calibration windows   (minimised)
+  f2 = bits per weight over the target matrices          (minimised)
 
-Optional constraint: g1 = bpw - max_bpw <= 0.
+which is the original two-objective problem.
+
+bpw is preferred over -CR for the size axis because it is linear in the thing
+the search actually controls and because every baseline in the literature is
+quoted in bits. CR is derived and logged alongside, and can be made an
+objective in its own right -- but only usefully when it is drawn from a
+*different* bit total than the bpw objective, since `cr_deployable` is exactly
+`16 / bpw_model` and adds nothing next to any deployable bpw measure.
+
+Optional constraint: g1 = bpw - max_bpw <= 0, always applied to the
+`size_objective` measure regardless of what is being optimised.
 """
 
 from __future__ import annotations
@@ -19,6 +28,7 @@ import numpy as np
 from pymoo.core.problem import ElementwiseProblem
 
 from .evaluate import proxy_fitness
+from .objectives import ObjectiveSet
 
 
 class CompressionProblem(ElementwiseProblem):
@@ -30,11 +40,12 @@ class CompressionProblem(ElementwiseProblem):
         self.history: list[dict] = []
         self.n_baseline_evals = 0
         self._t0 = time.perf_counter()
+        self.objectives = ObjectiveSet(getattr(cfg.search, "objectives", None))
 
         xl, xu = compressor.genome.bounds()
         super().__init__(
             n_var=compressor.genome.n_var,
-            n_obj=2,
+            n_obj=self.objectives.n_obj,
             n_ieq_constr=1 if cfg.search.max_bpw is not None else 0,
             xl=xl,
             xu=xu,
@@ -46,12 +57,17 @@ class CompressionProblem(ElementwiseProblem):
         ppl = proxy_fitness(self.compressor.model, self.windows,
                             device=self.compressor.device)
 
-        cost = cand.cost
-        size = (cost.bpw_target if self.cfg.search.size_objective == "bpw_target"
-                else cost.bpw_model)
+        summary = cand.cost.summary()
+        values = self.objectives.values(ppl, summary)
+        out["F"] = self.objectives.to_min(values)
 
-        out["F"] = [ppl, size]
         if self.cfg.search.max_bpw is not None:
+            # The budget is a statement about deployed size, so it is checked
+            # against size_objective whether or not that measure is being
+            # optimised. Reading it off the objective vector instead would
+            # silently constrain the wrong quantity when the front is drawn on
+            # archival axes.
+            size = summary[self.cfg.search.size_objective]
             out["G"] = [size - self.cfg.search.max_bpw]
 
         record = {
@@ -61,7 +77,7 @@ class CompressionProblem(ElementwiseProblem):
             "apply_seconds": round(cand.apply_seconds, 3),
             "ppl_proxy": ppl,
             "x": [round(float(v), 5) for v in np.asarray(x)],
-            **{k: round(v, 5) for k, v in cost.summary().items()},
+            **{k: round(v, 5) for k, v in summary.items()},
         }
         self.history.append(record)
         if self.run is not None:
