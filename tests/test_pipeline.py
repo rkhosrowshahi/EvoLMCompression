@@ -143,6 +143,64 @@ def test_pruning_zeroes_the_band_and_reserves_a_codeword():
     assert st.symbol_counts[0] == inside.sum().item()
 
 
+def test_pruning_moves_the_archival_objective_and_not_the_deployable_one():
+    """The premise of the *_3obj_prune configs, checked at objective level.
+
+    The reserved zero codeword keeps the index width at ceil(log2 K) and
+    k_centroids at K no matter how much is pruned, so t_lo/t_hi are invisible
+    to bpw_target and fully visible to cr_archival. Two genes that move one
+    size objective and not the other are what make the front genuinely 3-D --
+    if this ever fails, those configs are searching a 2-D problem.
+    """
+    from evolmc.codec import ModelCost
+    from evolmc.objectives import ObjectiveSet
+
+    torch.manual_seed(0)
+    w = torch.randn(64, 4096)
+    scale = w.std(1, keepdim=True)
+    cfg = _cfgs()
+    objset = ObjectiveSet(("ppl_proxy", "bpw_target", "cr_archival"))
+
+    deployable, archival, sparsity = [], [], []
+    for t in (0.0, 0.25, 0.5, 1.0, 1.5):
+        _, st = compress_layer(w, scale, k=64, t_lo=-t, t_hi=t,
+                               quant_cfg=cfg.quant, prune_cfg=cfg.prune, name="t")
+        cost = ModelCost(layers=[price_layer(st)], n_untouched_weights=10_000)
+        _, bpw, cr = objset.values(1.0, cost.summary())
+        deployable.append(bpw)
+        archival.append(cr)
+        sparsity.append(st.sparsity)
+
+    # Pruning really is happening ...
+    assert sparsity[0] == 0.0 and sparsity[-1] > 0.8
+    # ... the deployable objective does not move at all ...
+    assert len({round(b, 9) for b in deployable}) == 1, deployable
+    # ... and every step of it buys archival compression.
+    assert all(a < b for a, b in zip(archival, archival[1:])), archival
+    assert archival[-1] > archival[0] * 1.5
+
+    # k_centroids stays K, which is why the index width never widens.
+    _, st = compress_layer(w, scale, k=64, t_lo=-1.5, t_hi=1.5,
+                           quant_cfg=cfg.quant, prune_cfg=cfg.prune, name="t")
+    assert st.k_centroids == 64
+
+
+def test_asymmetric_pruning_bands_are_reachable():
+    """The band is two genes, so it need not be symmetric about zero."""
+    torch.manual_seed(0)
+    w = torch.randn(16, 2048)
+    scale = w.std(1, keepdim=True)
+    cfg = _cfgs()
+    _, sym = compress_layer(w, scale, k=16, t_lo=-0.6, t_hi=0.6,
+                            quant_cfg=cfg.quant, prune_cfg=cfg.prune, name="t")
+    _, asym = compress_layer(w, scale, k=16, t_lo=-0.6, t_hi=1.4,
+                             quant_cfg=cfg.quant, prune_cfg=cfg.prune, name="t")
+    # A wider positive side prunes strictly more.
+    assert asym.sparsity > sym.sparsity
+    # Still one reserved zero codeword, still the same index width.
+    assert asym.k_centroids == sym.k_centroids == 16
+
+
 def test_pruning_lowers_archival_cost_at_fixed_index_width():
     torch.manual_seed(0)
     w = torch.randn(8, 4096)

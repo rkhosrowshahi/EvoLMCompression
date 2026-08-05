@@ -30,11 +30,36 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-CONFIGS=(
+# Six runs: three groupings x pruning off/on. Each pruned config differs from
+# its unpruned pair in exactly ONE effective setting, prune.enabled, so the
+# pair isolates what sparsity buys.
+#
+#   bash scripts/run_gpt2_k_3obj_experiments.sh --only noprune
+#   bash scripts/run_gpt2_k_3obj_experiments.sh --only prune
+#
+# Anything else is forwarded to run_search.py.
+NOPRUNE=(
   configs/gpt2_k_global_3obj.yaml
   configs/gpt2_k_block_3obj.yaml
   configs/gpt2_k_layer_3obj.yaml
 )
+PRUNE=(
+  configs/gpt2_k_global_3obj_prune.yaml
+  configs/gpt2_k_block_3obj_prune.yaml
+  configs/gpt2_k_layer_3obj_prune.yaml
+)
+
+ONLY=all
+if [ "${1:-}" = "--only" ]; then
+  ONLY="${2:-all}"
+  shift 2
+fi
+case "$ONLY" in
+  all)     CONFIGS=("${NOPRUNE[@]}" "${PRUNE[@]}") ;;
+  noprune) CONFIGS=("${NOPRUNE[@]}") ;;
+  prune)   CONFIGS=("${PRUNE[@]}") ;;
+  *) echo "--only takes: all, noprune, prune (got '$ONLY')" >&2; exit 2 ;;
+esac
 
 python3 - <<'PY'
 try:
@@ -56,14 +81,21 @@ trap 'rm -f "$DIR_FILE"' EXIT
 
 echo "=============================================================="
 echo " GPT-2 K sweep, 3 objectives: ppl / bpw_target / cr_archival"
-echo " 3 experiments, K in [2, 8192], no pruning"
+echo " ${#CONFIGS[@]} experiments (--only $ONLY), K in [2, 8192]"
 echo " started $(date)"
 echo "=============================================================="
 echo
-echo " Expect the third objective to do NOTHING at global (one K is a"
-echo " one-parameter family, so archival cost is a deterministic monotone"
-echo " function of it), something at block, and most at layer. That"
-echo " progression is the result; global is the control."
+echo " WITHOUT pruning, f2 and f3 separate only through how K is spread"
+echo " between groups. So expect the third objective to do NOTHING at"
+echo " global (one K is a one-parameter family), something at block, and"
+echo " most at layer. Global is the control for that progression."
+echo
+echo " WITH pruning, t_lo/t_hi are invisible to f2 by construction -- the"
+echo " reserved zero codeword keeps the index width at ceil(log2 K) no"
+echo " matter how much is pruned -- and fully visible to f3. That is a"
+echo " source of separation orthogonal to K, so even the global config"
+echo " should open a third dimension. If it does not, the separation"
+echo " depends on distributing K rather than on sparsity."
 
 for cfg in "${CONFIGS[@]}"; do
   echo
