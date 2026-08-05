@@ -4,8 +4,13 @@ pymoo>=0.6.1
 numpy>=1.24
 pyyaml>=6.0
 matplotlib>=3.7      # figures
-pillow>=9.0          # gif encoding in evolmc/video.py (imported directly,
-                     # so declared rather than leaned on via matplotlib)
+# Needed twice over: gif encoding in evolmc/video.py, and transformers'
+# image_utils does `PIL.Image.Resampling` unconditionally while loading ANY
+# model. That enum arrived in 9.1.0, and transformers only declares Pillow
+# under its `vision` extra -- so a core install can leave an ancient system
+# Pillow in place and every from_pretrained() dies with
+# "module 'PIL.Image' has no attribute 'Resampling'".
+pillow>=10.0.1
 
 # Real corpora (WikiText-2 / C4). Not needed for scripts/smoke_test.py.
 datasets>=2.18
