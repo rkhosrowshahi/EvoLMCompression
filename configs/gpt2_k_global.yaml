@@ -110,7 +110,7 @@ search:
 
 log:
   root: logs
-  run_name: gpt2-k-global-short-np10-ng100
+  run_name: gpt2-k-global-np100-ng100
   checkpoint_every: 10
   save_history: true
 
