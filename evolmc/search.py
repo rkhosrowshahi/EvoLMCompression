@@ -155,7 +155,7 @@ def _log_objective_correlations(run, objset, measured):
     rho = spearman_matrix(objset.to_min(F))
 
     run.log("\nobjective correlation on the reference sweep (Spearman, "
-            "minimisation space)")
+            "minimization space)")
     width = max(len(n) for n in objset.names) + 2
     run.log("  " + "".ljust(width) + "".join(n[:10].rjust(11)
                                              for n in objset.names))
@@ -211,7 +211,7 @@ def run_search(problem, cfg, run, resume_from: str | None = None):
         if not cfg.search.warm_start:
             mode = "random"       # deprecated alias, kept working
         sampling = genome.seed_population(cfg.search.pop_size, rng, mode)
-        run.log(f"initialisation: {mode} "
+        run.log(f"initialization: {mode} "
                 f"({cfg.search.pop_size} individuals)")
         pv = (cfg.search.mutation_prob_var
               if cfg.search.mutation_prob_var is not None
@@ -226,11 +226,21 @@ def run_search(problem, cfg, run, resume_from: str | None = None):
                         seed=cfg.search.seed, verbose=False)
 
     # One column per objective, so a 3-objective run reports its third axis
-    # instead of silently optimising something the log never mentions.
-    heads = [f"best {s.name}"[:11] for s in objset]
-    run.log(f"\n{'gen':>5}{'evals':>8}{'|front|':>9}"
-            + "".join(h.rjust(13) for h in heads) + f"{'HV':>9}{'sec':>8}")
-    run.log("-" * (31 + 13 * len(heads) + 17))
+    # instead of silently optimizing something the log never mentions.
+    # One column per objective, then per reported metric. Each cell holds the
+    # front's IDEAL and NADIR for that quantity -- the best and the worst value
+    # it takes over the non-dominated set, which is the standard multi-objective
+    # pair. Note this is NOT the hypervolume box printed above: that box is
+    # fixed for the whole run and derived from the reference sweep, while these
+    # move every generation and describe the front itself.
+    metrics = tuple(problem.report_metrics)
+    cols = list(objset.names) + list(metrics)
+    W = 17
+    run.log(f"\n{'':>25}{'ideal / nadir over the front':<{W * len(cols)}}")
+    run.log(f"{'gen':>5}{'evals':>8}{'front_size':>12}"
+            + "".join(c[:W - 2].rjust(W) for c in cols)
+            + f"{'HV':>9}{'sec':>8}")
+    run.log("-" * (25 + W * len(cols) + 17))
 
     history, records = [], []
     while algorithm.has_next():
@@ -244,24 +254,41 @@ def run_search(problem, cfg, run, resume_from: str | None = None):
         X_pop = algorithm.pop.get("X")
         X_front = algorithm.opt.get("X")
         # Everything below here is REAL space: the sign flip that makes a
-        # maximised objective minimisable belongs to pymoo, not to the log,
+        # maximized objective minimizable belongs to pymoo, not to the log,
         # the figures or the stored front.
         F_pop = objset.to_real(algorithm.pop.get("F"))
         F_front = objset.to_real(algorithm.opt.get("F"))
         hv_now = hv(F_front)
         dt = time.perf_counter() - t0
 
+        # Ideal = best over the front, nadir = worst over the front, each read
+        # in the objective's own direction.
         best = {s.name: (float(np.min(F_front[:, j])) if s.sense == 1
                          else float(np.max(F_front[:, j])))
                 for j, s in enumerate(objset)}
         worst = {s.name: (float(np.max(F_front[:, j])) if s.sense == 1
                           else float(np.min(F_front[:, j])))
                  for j, s in enumerate(objset)}
+        # Reported metrics are not optimized, so they have no direction and
+        # "ideal" is meaningless for them: report the range the front spans.
+        mvals = {}
+        for name in metrics:
+            v = algorithm.opt.get(name)
+            if v is None:
+                continue
+            v = np.ravel(np.asarray(v, dtype=float))
+            v = v[np.isfinite(v)]
+            if len(v):
+                mvals[name] = (float(v.min()), float(v.max()))
         rec = {
             "gen": gen,
             "n_eval": comp.n_evals,
             "n_front": int(len(F_front)),
             "objectives": list(objset.names),
+            "ideal": best,
+            "nadir": worst,
+            "metrics": {k: {"min": lo, "max": hi} for k, (lo, hi) in mvals.items()},
+            # Kept under the old names so existing readers do not break.
             "best": best,
             "worst": worst,
             "hypervolume": hv_now,
@@ -274,8 +301,10 @@ def run_search(problem, cfg, run, resume_from: str | None = None):
         rec["max_bpw"] = worst.get(objset[1].name)
         records.append(rec)
         run.jsonl("generations", rec)
-        run.log(f"{gen:>5}{comp.n_evals:>8}{len(F_front):>9}"
-                + "".join(f"{best[s.name]:>13.3f}" for s in objset)
+        cells = [_pair(best[s.name], worst[s.name]) for s in objset]
+        cells += [_pair(*mvals[m]) if m in mvals else "-" for m in metrics]
+        run.log(f"{gen:>5}{comp.n_evals:>8}{len(F_front):>12}"
+                + "".join(c.rjust(W) for c in cells)
                 + f"{hv_now:>9.4f}{dt:>8.1f}", echo=True)
 
         if cfg.log.save_history:
@@ -338,6 +367,28 @@ def run_search(problem, cfg, run, resume_from: str | None = None):
     return res, records
 
 
+def _num(v: float) -> str:
+    """Four significant figures in as few characters as possible.
+
+    Values in one table span perplexities from 27 to 1e8 and ratios down to
+    0.001, so any fixed decimal format either loses the small ones or spends
+    the whole column width on the large ones.
+    """
+    if not np.isfinite(v):
+        return "inf" if v > 0 else "-inf"
+    a = abs(v)
+    if a and (a >= 1e4 or a < 1e-2):
+        return f"{v:.1e}".replace("e+0", "e").replace("e-0", "e-")
+    if a >= 100:
+        return f"{v:.0f}"
+    return f"{v:.3g}"
+
+
+def _pair(lo: float, hi: float) -> str:
+    """One cell holding a quantity's ideal and nadir."""
+    return f"{_num(lo)}/{_num(hi)}"
+
+
 def _axis(bound):
     """(ideal, nadir) -> an increasing (lo, hi) matplotlib can take."""
     return (min(bound), max(bound))
@@ -382,8 +433,8 @@ def _log_hv_reference(run, hv, fp16, baselines, cfg, objset):
     ideal = ", ".join(f"{n} {v:,.3f}" for n, v in zip(objset.names, hv.ideal))
     ones = ", ".join(["1.0"] * len(objset))
     zeros = ", ".join(["0.0"] * len(objset))
-    run.log(f"  reference point (worst corner)  {corner}  ->  ({ones}) normalised")
-    run.log(f"  ideal point     (best corner)   {ideal}  ->  ({zeros}) normalised")
+    run.log(f"  reference point (worst corner)  {corner}  ->  ({ones}) normalized")
+    run.log(f"  ideal point     (best corner)   {ideal}  ->  ({zeros}) normalized")
 
     run.log(f"  y lower: {_bound_origin(cfg.plot.ylim_min, cfg.plot.ylim_min_ratio, fp16, 'lowest reference')}")
     run.log(f"  y upper: {_bound_origin(cfg.plot.ylim_max, cfg.plot.ylim_max_ratio, fp16, 'highest reference')}")
@@ -398,7 +449,7 @@ def _log_hv_reference(run, hv, fp16, baselines, cfg, objset):
             run.log(f"  note: {len(off)} baseline point(s) lie outside the box "
                     f"(K={', '.join(str(b[2]) for b in off)}) and are clipped "
                     f"to the reference corner when scored")
-    run.log("  HV is normalised to [0,1]; comparable only across runs sharing "
+    run.log("  HV is normalized to [0,1]; comparable only across runs sharing "
             "this box")
 
 
@@ -516,7 +567,7 @@ def save_front(res, problem, cfg, run):
     """Write the final front as both JSON (full genomes) and CSV (a table).
 
     Objective values are written in REAL space under their own names, so a
-    maximised objective appears as the ratio it is rather than as a negative
+    maximized objective appears as the ratio it is rather than as a negative
     number nobody can interpret three months later.
     """
     objset = problem.objectives

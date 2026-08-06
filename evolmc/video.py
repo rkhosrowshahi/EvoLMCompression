@@ -68,10 +68,10 @@ def _encode_mp4(frames, out_path, fps, hold_last):
 
 
 def _global_palette(images, max_side=240):
-    """One 256-colour palette representative of the *whole* sequence.
+    """One 256-color palette representative of the *whole* sequence.
 
     Derived from a downsampled stack of every frame, not from the first one.
-    A palette taken from frame 1 alone only covers the colours that happened to
+    A palette taken from frame 1 alone only covers the colors that happened to
     be on screen at generation 1: anything introduced later (a front line that
     did not exist yet, a marker in a fresh region) gets crushed onto the
     nearest existing entry, and near-identical frames can collapse entirely.
@@ -105,7 +105,7 @@ def _encode_gif(frames, out_path, fps, hold_last):
     ms = int(1000 / max(fps, 1))
     durations = [ms] * len(quantized)
     durations[-1] = ms * hold_last
-    # optimize=False: Pillow's optimiser drops frames it considers duplicates,
+    # optimize=False: Pillow's optimizer drops frames it considers duplicates,
     # which silently desynchronises the animation from the generation count.
     # One frame in, one frame out.
     quantized[0].save(
@@ -123,7 +123,7 @@ def make_video(frames_dir, out_stem, fps=4, formats=("mp4", "gif"),
 
     Returns the paths written. Missing encoders are reported and skipped rather
     than raised -- a video is a convenience, and losing it must never fail a
-    search that already produced its real artefacts.
+    search that already produced its real artifacts.
     """
     frames = find_frames(frames_dir)
     if len(frames) < 2:

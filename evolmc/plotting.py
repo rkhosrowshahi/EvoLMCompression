@@ -270,7 +270,7 @@ def _check_ylim(ylim, yscale):
 
     Perplexity is exp(cross-entropy) and cross-entropy is non-negative, so
     PPL >= 1 always; PPL == 1 is a model that assigns probability 1 to every
-    correct token. A floor of 0 is therefore not merely optimistic, and on a
+    correct token. A floor of 0 is therefore not merely optimiztic, and on a
     log axis it is at -infinity and cannot be rendered at all.
     """
     lo, hi = float(ylim[0]), float(ylim[1])
@@ -289,8 +289,8 @@ def _check_ylim(ylim, yscale):
 class ParetoPlotter:
     """Per-generation frames, drawn from REAL-space objective values.
 
-    Callers convert pymoo's minimisation vectors with `ObjectiveSet.to_real`
-    first, so a maximised objective is drawn and labelled in the units it is
+    Callers convert pymoo's minimization vectors with `ObjectiveSet.to_real`
+    first, so a maximized objective is drawn and labeled in the units it is
     reported in rather than as a negative number.
 
     With three or more objectives the frame stays 2-D and projects: objective 0
@@ -298,7 +298,7 @@ class ParetoPlotter:
     so frames stay comparable. The front is then drawn as a scatter rather than
     a connected curve, because a 3-objective front is a surface and joining its
     members in bpw order would draw a line through points that do not lie on
-    one. Objectives past the third are optimised but not drawn.
+    one. Objectives past the third are optimized but not drawn.
     """
 
     def __init__(self, run, cfg, xlim, ylim, fp16_ppl=None, baselines=None,
@@ -405,7 +405,7 @@ class ParetoPlotter:
             else:
                 # No connecting line: with a third objective the front is a
                 # surface, and joining its members in x order draws a curve
-                # through points that are not neighbours on it.
+                # through points that are not neighbors on it.
                 inside = self._mask_inside(f[:, 1], f[:, 0])
                 mappable = ax.scatter(
                     f[inside, 1], f[inside, 0], c=f[inside, 2],
@@ -473,7 +473,7 @@ class ParetoPlotter:
     def convergence(self, gens, hv, evals=None):
         """Hypervolume against generation -- the standard convergence figure.
 
-        HV is computed on objectives normalised by the frozen axis box, so it
+        HV is computed on objectives normalized by the frozen axis box, so it
         is comparable across runs of different models.
         """
         t = self.theme
@@ -488,7 +488,7 @@ class ParetoPlotter:
                 mfc=t["front"], mec=t["surface"], mew=1.0)
         pt = self.base_pt
         ax.set_xlabel("generation", fontsize=pt, color=t["ink_2"])
-        ax.set_ylabel("hypervolume (normalised)", fontsize=pt, color=t["ink_2"])
+        ax.set_ylabel("hypervolume (normalized)", fontsize=pt, color=t["ink_2"])
         if not self.exact_canvas:
             ax.set_title("Search convergence", fontsize=pt + 2, color=t["ink"],
                          loc="left", pad=10)
@@ -572,8 +572,8 @@ class ParetoPlotter:
         """Label intermediate decades when the range is under two of them.
 
         A frozen log box often spans well under a decade, where matplotlib's
-        default locator leaves a single labelled tick and the axis reads as
-        unlabelled.
+        default locator leaves a single labeled tick and the axis reads as
+        unlabeled.
         """
         from matplotlib.ticker import LogLocator, NullFormatter, ScalarFormatter
 
@@ -636,11 +636,11 @@ def hv_indicator_nd(bounds, logs=None, names=None):
 
     `bounds` is one (ideal, nadir) pair per objective, in that objective's own
     units and direction: `ideal` is the best corner and `nadir` the worst, so a
-    maximised objective simply has ideal > nadir and needs no sign flips here.
+    maximized objective simply has ideal > nadir and needs no sign flips here.
     That is what lets callers hand this function the same real-valued arrays
-    they plot and report, instead of pymoo's internal minimisation vectors.
+    they plot and report, instead of pymoo's internal minimization vectors.
 
-    Normalising by the frozen box means HV is bounded in [0, 1] and comparable
+    Normalizing by the frozen box means HV is bounded in [0, 1] and comparable
     across models, which raw-perplexity HV is not.
 
     The returned callable carries `.ref_point`, `.ideal`, `.bounds`, `.logs`
@@ -656,7 +656,7 @@ def hv_indicator_nd(bounds, logs=None, names=None):
         raise ValueError(f"got {m} bounds but {len(logs)} log flags")
     ind = HV(ref_point=np.ones(m))
 
-    # Pre-transform the box once. On a log objective the whole normalisation
+    # Pre-transform the box once. On a log objective the whole normalization
     # happens in log space, so the padding reads evenly across decades.
     prepped = []
     for (ideal, nadir), lg in zip(bounds, logs):
@@ -702,7 +702,7 @@ def hv_indicator(xlim, ylim, yscale="log"):
 
     Thin wrapper over `hv_indicator_nd` kept because the comparison script and
     every stored 2-objective run speak this signature. Both objectives are
-    minimised, so real space and pymoo's minimisation space coincide and the
+    minimized, so real space and pymoo's minimization space coincide and the
     stored fronts can be passed straight in.
     """
     hv = hv_indicator_nd([(ylim[0], ylim[1]), (xlim[0], xlim[1])],
@@ -872,7 +872,7 @@ def plot_front_on_corpus(stem, cfg, front, baseline=None, fp16=None,
 
     Drawn on whichever corpus the caller supplies -- pass the held-out one for
     the figure a reviewer should see, since a front drawn on the corpus the
-    search optimised is partly a picture of overfitting.
+    search optimized is partly a picture of overfitting.
     """
     fig, ax, t, pt = _new_axes(cfg)
     f = np.asarray(front, dtype=float)
@@ -904,9 +904,9 @@ def plot_calib_vs_eval(stem, cfg, bpw, ppl_calib, ppl_eval,
     """The same genomes scored on both corpora, on one axis.
 
     Both series are perplexity in the same units, so this is one y axis, not
-    two -- the vertical gap between the curves IS the generalisation gap, and
+    two -- the vertical gap between the curves IS the generalization gap, and
     showing it is more persuasive than asking a reader to trust a single curve
-    drawn on the corpus the search optimised.
+    drawn on the corpus the search optimized.
     """
     fig, ax, t, pt = _new_axes(cfg)
     order = np.argsort(np.asarray(bpw, dtype=float))
@@ -935,9 +935,9 @@ def plot_proxy_correlation(stem, cfg, ppl_calib, ppl_eval, rho=None,
                            title=None):
     """Does the cheap proxy rank candidates the way the full metric does?
 
-    This is the plot that says whether the search optimised something real. A
+    This is the plot that says whether the search optimized something real. A
     tight monotone cloud means the surrogate is valid; a scattered one means
-    the front is partly an artefact of the few proxy windows.
+    the front is partly an artifact of the few proxy windows.
     """
     fig, ax, t, pt = _new_axes(cfg, square=True)
     a = np.asarray(ppl_calib, dtype=float)

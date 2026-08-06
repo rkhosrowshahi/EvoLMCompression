@@ -1,21 +1,21 @@
-"""Which quantities the search optimises, and in which direction.
+"""Which quantities the search optimizes, and in which direction.
 
 `search.objectives` in the config is a list of names from the registry below.
 Everything else -- how many objectives pymoo is told about, what the plot axes
-are, how hypervolume is normalised, what lands in front.csv -- is derived from
+are, how hypervolume is normalized, what lands in front.csv -- is derived from
 that list, so adding or reordering an objective is a config change rather than
 a code change.
 
 Two rules that are easy to get wrong:
 
-1. pymoo minimises. A maximised objective (every `cr_*`) is stored negated in
+1. pymoo minimizes. A maximized objective (every `cr_*`) is stored negated in
    `F`, and only ever converted back for display. `ObjectiveSet.to_min` and
    `.to_real` are the single pair of functions that know this; nothing else
    should be flipping signs.
 
 2. Two objectives that are monotone transforms of the same underlying scalar
    are not two objectives. `cr_deployable` is exactly `16 / bpw_model`, because
-   both normalise `target_bits_deployable + untouched_bits` (see codec.py), so
+   both normalize `target_bits_deployable + untouched_bits` (see codec.py), so
    pairing them leaves dominance unchanged and the front is identical to the
    2-objective run. `check_redundancy` is what catches this at runtime; the
    registry's `bit_total` field is what it reasons about.
@@ -33,24 +33,24 @@ from dataclasses import dataclass
 
 import numpy as np
 
-MINIMISE, MAXIMISE = 1, -1
+MINIMIZE, MAXIMIZE = 1, -1
 
 
 @dataclass(frozen=True)
 class Objective:
     name: str
-    sense: int          # MINIMISE or MAXIMISE
+    sense: int          # MINIMIZE or MAXIMIZE
     label: str          # axis label, without the scope
     scope: str          # which weights it covers; "" when not a size measure
     bit_total: str      # "deployable" | "archival" | "" -- see check_redundancy
-    log: bool = False   # draw and normalise on a log axis
+    log: bool = False   # draw and normalize on a log axis
 
     @property
     def axis_label(self) -> str:
         return f"{self.label} ({self.scope})" if self.scope else self.label
 
     def better(self, a: float, b: float) -> bool:
-        return (a < b) if self.sense == MINIMISE else (a > b)
+        return (a < b) if self.sense == MINIMIZE else (a > b)
 
 
 # Scope matters for the caption. `bpw_target` covers only the compressed
@@ -59,30 +59,30 @@ class Objective:
 # So 16/bpw_target does NOT equal cr_deployable, and a figure that does not say
 # so invites a reader to try the arithmetic and conclude something is broken.
 REGISTRY: dict[str, Objective] = {o.name: o for o in (
-    Objective("ppl_proxy", MINIMISE, "proxy perplexity", "", "", log=True),
+    Objective("ppl_proxy", MINIMIZE, "proxy perplexity", "", "", log=True),
 
     # -- deployable: fixed-width indices + codebooks ------------------------
-    Objective("bpw_target", MINIMISE, "bits per weight",
+    Objective("bpw_target", MINIMIZE, "bits per weight",
               "target matrices", "deployable"),
-    Objective("bpw_model", MINIMISE, "bits per weight",
+    Objective("bpw_model", MINIMIZE, "bits per weight",
               "full checkpoint", "deployable"),
-    Objective("cr_deployable", MAXIMISE, "compression ratio",
+    Objective("cr_deployable", MAXIMIZE, "compression ratio",
               "full checkpoint", "deployable"),
-    Objective("size_mb_deployable", MINIMISE, "size (MB)",
+    Objective("size_mb_deployable", MINIMIZE, "size (MB)",
               "full checkpoint", "deployable"),
 
     # -- archival: entropy-coded indices + codebooks + code-length tables ---
-    Objective("bpw_target_archival", MINIMISE, "bits per weight, entropy-coded",
+    Objective("bpw_target_archival", MINIMIZE, "bits per weight, entropy-coded",
               "target matrices", "archival"),
-    Objective("bpw_model_archival", MINIMISE, "bits per weight, entropy-coded",
+    Objective("bpw_model_archival", MINIMIZE, "bits per weight, entropy-coded",
               "full checkpoint", "archival"),
-    Objective("cr_archival", MAXIMISE, "compression ratio, entropy-coded",
+    Objective("cr_archival", MAXIMIZE, "compression ratio, entropy-coded",
               "full checkpoint", "archival"),
-    Objective("size_mb_archival", MINIMISE, "size (MB)",
+    Objective("size_mb_archival", MINIMIZE, "size (MB)",
               "full checkpoint", "archival"),
 
     # -- neither ------------------------------------------------------------
-    Objective("sparsity", MAXIMISE, "sparsity", "target matrices", ""),
+    Objective("sparsity", MAXIMIZE, "sparsity", "target matrices", ""),
 )}
 
 DEFAULT = ("ppl_proxy", "bpw_target")
@@ -148,7 +148,7 @@ class ObjectiveSet:
             )
         return [float(source[n]) for n in self.names]
 
-    # -- pymoo lives in minimisation space ---------------------------------
+    # -- pymoo lives in minimization space ---------------------------------
 
     def to_min(self, values):
         """Real values -> what goes in `out['F']`."""
@@ -164,7 +164,7 @@ class ObjectiveSet:
     def describe(self) -> str:
         rows = []
         for i, s in enumerate(self.specs):
-            arrow = "min" if s.sense == MINIMISE else "MAX"
+            arrow = "min" if s.sense == MINIMIZE else "MAX"
             rows.append(f"  f{i + 1}  {s.name:<22} {arrow}   {s.axis_label}")
         return "objectives\n" + "\n".join(rows)
 

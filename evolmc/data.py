@@ -135,7 +135,7 @@ def build_splits(cfg, tokenizer) -> dict[str, torch.Tensor]:
     """Proxy windows for the search loop, eval windows for the final front.
 
     The proxy set is drawn from the calibration corpus and the eval set from a
-    held-out corpus, so the search cannot optimise the reported metric directly.
+    held-out corpus, so the search cannot optimize the reported metric directly.
     """
     need_proxy = (cfg.n_proxy_seq + 8) * cfg.seqlen
     calib = load_corpus(

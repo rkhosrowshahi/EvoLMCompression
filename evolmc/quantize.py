@@ -4,7 +4,7 @@ Pipeline for one weight matrix, given (K, t_lo, t_hi):
 
   1. prune   -- zero every weight inside the band [t_lo, t_hi]
   2. bin     -- partition the *surviving* weights into K-1 bins
-  3. centre  -- each codeword is the mean of the weights in its bin
+  3. center  -- each codeword is the mean of the weights in its bin
   4. replace -- hard-substitute every weight by its codeword
 
 Pruned weights are folded into the codebook as a reserved zero codeword rather

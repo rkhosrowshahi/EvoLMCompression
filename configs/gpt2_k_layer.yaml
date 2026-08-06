@@ -150,5 +150,5 @@ plot:
 # encoding widens each one from 13 options to 8191. If this front is
 # not better than the block-wise one, re-run with algorithm: unsga3
 # before concluding that finer granularity does not help -- the two
-# hypotheses (granularity is useless / the optimiser ran out of
+# hypotheses (granularity is useless / the optimizer ran out of
 # resolution) are different, and the paper needs to separate them.

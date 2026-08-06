@@ -9,7 +9,7 @@ Multi-objective post-training compression for language models: codebook
 quantization + threshold-band pruning + entropy coding, with NSGA-II choosing
 the per-layer codebook size `K` and the pruning band `(t_lo, t_hi)`.
 
-The search minimises two objectives — **proxy perplexity** and **bits per
+The search minimizes two objectives — **proxy perplexity** and **bits per
 weight** — and returns a Pareto front of quality/size trade-offs.
 
 ## Quick start
@@ -48,7 +48,7 @@ single quantization and writes three more figures:
 | Figure | What it shows |
 |---|---|
 | `figures/front_eval` | the front on held-out `wikitext2` — **the figure a paper leads with** |
-| `figures/front_calib_vs_eval` | both curves on one axis; the vertical gap is the generalisation gap |
+| `figures/front_calib_vs_eval` | both curves on one axis; the vertical gap is the generalization gap |
 | `figures/proxy_vs_eval` | per-member scatter with Spearman ρ — is the cheap proxy a valid surrogate? |
 
 `data/results.csv` gains `ppl_eval` and `ppl_calib` columns side by side.
@@ -57,7 +57,7 @@ A front drawn on the calibration corpus is partly a picture of overfitting:
 thousands of evaluations against a handful of windows will find configurations
 that suit *those windows*. Reporting held-out numbers, and showing the gap
 rather than hiding it, is what makes the result defensible. The terminal warns
-when ρ drops below 0.9 — that means the search partly optimised noise and
+when ρ drops below 0.9 — that means the search partly optimized noise and
 `data.n_proxy_seq` should go up.
 
 ```bash
@@ -113,11 +113,11 @@ be replayed exactly.
 `logs/generations.jsonl` — one record per generation: front size, best
 perplexity, bpw range, hypervolume, wall-clock, and the front itself.
 `data/history.npz` holds the raw `X` and `F` arrays for every generation if you
-want to re-plot or re-analyse offline.
+want to re-plot or re-analyze offline.
 
 ### Figures
 
-The Pareto plot is the main artefact, written after every generation as **both
+The Pareto plot is the main artifact, written after every generation as **both
 PNG and PDF** (`pdf.fonttype 42`, so text stays selectable in LaTeX).
 
 **Axis limits are computed once, before generation 1, and frozen for the whole
@@ -248,13 +248,13 @@ python scripts/make_video.py latest --fps 8
   missing index.
 - **gif** via Pillow, which ships with matplotlib — no external dependency, so
   this always works. One palette is derived from a downsampled stack of *every*
-  frame, not from the first one: a frame-1 palette misses colours introduced
+  frame, not from the first one: a frame-1 palette misses colors introduced
   later and can collapse near-identical frames entirely.
 
 Both hold the final frame for `hold_last` frame-durations so the converged
 front is readable before the loop restarts. Missing encoders are reported and
 skipped, never raised — losing a video must not fail a search that already
-produced its real artefacts.
+produced its real artifacts.
 
 ### Resuming
 
@@ -350,7 +350,7 @@ at **2.8x** regardless of K, because the embedding table is 31% of the
 checkpoint and stays fp16 — see the exclusion table below.
 
 `compare_runs.py` **recomputes every hypervolume on one shared axis box**
-rather than reading each run's logged value. Stored HV is normalised by that
+rather than reading each run's logged value. Stored HV is normalized by that
 run's own box, and the end-of-run refit can move a box, so stored values are
 not comparable across runs — in testing, the ranking flipped once they were
 put on a common box.
@@ -361,7 +361,7 @@ For each weight matrix, given `(K, t_lo, t_hi)`:
 
 1. **Prune** — zero every weight inside the band `[t_lo, t_hi]`.
 2. **Bin** — partition the surviving weights into `K-1` bins.
-3. **Centre** — each codeword is the mean of the weights in its bin.
+3. **Center** — each codeword is the mean of the weights in its bin.
 4. **Replace** — hard-substitute every weight by its codeword.
 5. **Price** — count index bits, codebook bits and Huffman table bits.
 
@@ -417,7 +417,7 @@ gives useful selection pressure. `variables.k_grouping` selects
 `global` (1) / `type` (7) / `block` (32) / `block_type` (224). Start at `type`;
 when you move to `block_type`, switch `search.algorithm` to `unsga3`.
 
-**4. Pruning thresholds are scale-normalised.**
+**4. Pruning thresholds are scale-normalized.**
 `prune.mode: sigma` expresses the band in units of each row's weight standard
 deviation. Raw thresholds differ by orders of magnitude across layers, which
 makes the search space badly conditioned and wastes most of the EA's budget.

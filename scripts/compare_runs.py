@@ -8,7 +8,7 @@ works for any set of runs over the same model and objective.
     python scripts/compare_runs.py gpt2-k-block gpt2-k-layer --venue ieee --name my-ablation
 
 Hypervolume is **recomputed for every run on one common box**, not read from
-each run's log. Stored HV is normalised by that run's own axis box, and the
+each run's log. Stored HV is normalized by that run's own axis box, and the
 end-of-run refit can move a box, so the stored numbers are not comparable
 across runs. Same for the matched-bpw table: the point of the comparison is
 "at equal size, whose perplexity is lower", which requires interpolating each
@@ -128,7 +128,7 @@ def main():
 
     # One box for everybody, so hypervolume and the figure are comparable.
     # Union per objective, taking each end in its own direction: `ideal` is the
-    # best corner, which for a maximised objective is the LARGER number.
+    # best corner, which for a maximized objective is the LARGER number.
     shared = []
     for j, spec in enumerate(objset):
         ideals = [r["bounds"][j][0] for r in runs]
@@ -236,7 +236,7 @@ def main():
     _save(fig, os.path.join(out_dir, "fronts"), cfg, t, exact)
     if len(objset) > 2:
         print(f"note   objective(s) {[s.name for s in objset][2:]} are "
-              "optimised but not drawn; the overlay projects onto the first two")
+              "optimized but not drawn; the overlay projects onto the first two")
 
     # ---- convergence overlay ---------------------------------------------
     side = figsize[0]

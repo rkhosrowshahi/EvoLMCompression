@@ -1,11 +1,11 @@
 """The pymoo problem definition.
 
-Which objectives are optimised is set by `search.objectives` and resolved
+Which objectives are optimized is set by `search.objectives` and resolved
 through `objectives.ObjectiveSet`; see that module for the registry and the
 sign convention. The default list is
 
-  f1 = proxy perplexity on held-in calibration windows   (minimised)
-  f2 = bits per weight over the target matrices          (minimised)
+  f1 = proxy perplexity on held-in calibration windows   (minimized)
+  f2 = bits per weight over the target matrices          (minimized)
 
 which is the original two-objective problem.
 
@@ -17,7 +17,7 @@ objective in its own right -- but only usefully when it is drawn from a
 `16 / bpw_model` and adds nothing next to any deployable bpw measure.
 
 Optional constraint: g1 = bpw - max_bpw <= 0, always applied to the
-`size_objective` measure regardless of what is being optimised.
+`size_objective` measure regardless of what is being optimized.
 """
 
 from __future__ import annotations
@@ -41,6 +41,11 @@ class CompressionProblem(ElementwiseProblem):
         self.n_baseline_evals = 0
         self._t0 = time.perf_counter()
         self.objectives = ObjectiveSet(getattr(cfg.search, "objectives", None))
+        # Reported per generation but never optimized; must not collide with an
+        # objective, or the log would print the same column twice.
+        self.report_metrics = tuple(
+            m for m in getattr(cfg.search, "report_metrics", ())
+            if m not in self.objectives.names)
 
         xl, xu = compressor.genome.bounds()
         super().__init__(
@@ -61,10 +66,16 @@ class CompressionProblem(ElementwiseProblem):
         values = self.objectives.values(ppl, summary)
         out["F"] = self.objectives.to_min(values)
 
+        # Carried alongside F, not optimized. pymoo stores any extra key on the
+        # individual and keeps it through selection, so the per-generation log
+        # can report the front's sparsity without a second pass over genomes.
+        for name in self.report_metrics:
+            out[name] = float(summary[name])
+
         if self.cfg.search.max_bpw is not None:
             # The budget is a statement about deployed size, so it is checked
             # against size_objective whether or not that measure is being
-            # optimised. Reading it off the objective vector instead would
+            # optimized. Reading it off the objective vector instead would
             # silently constrain the wrong quantity when the front is drawn on
             # archival axes.
             size = summary[self.cfg.search.size_objective]

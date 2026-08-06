@@ -44,8 +44,8 @@
 #
 # Conveniently, `init: linspace` already sweeps K and t together along one
 # diagonal -- low K with no pruning, high K with heavy pruning -- which is
-# exactly the direction the break-even rule favours. Under dense that diagonal
-# was an awkward artefact; here it is aligned with where pruning pays.
+# exactly the direction the break-even rule favors. Under dense that diagonal
+# was an awkward artifact; here it is aligned with where pruning pays.
 #
 # -- OBJECTIVES ---------------------------------------------------------------
 #

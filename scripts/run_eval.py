@@ -3,10 +3,10 @@
 
 Re-prices every front member with true symbol histograms (the front file stores
 a flat-histogram estimate) and measures perplexity twice: on the calibration
-corpus the search optimised, and on the held-out corpus it never saw.
+corpus the search optimized, and on the held-out corpus it never saw.
 
 That second number is the one a paper reports. A front drawn on the corpus the
-search optimised is partly a picture of overfitting -- thousands of evaluations
+search optimized is partly a picture of overfitting -- thousands of evaluations
 against a handful of proxy windows will find configurations that suit those
 windows. The gap between the two curves is the honest statement of how much of
 the front survives, and the Spearman correlation says whether the cheap proxy
@@ -77,7 +77,7 @@ def main():
     calib_name, eval_name = cfg.data.calib_dataset, cfg.data.eval_dataset
     print(f"\nheld-out : {w_eval.shape[0]} x {w_eval.shape[1]} tokens of {eval_name}")
     print(f"calib    : {w_calib.shape[0]} x {w_calib.shape[1]} tokens of "
-          f"{calib_name} (what the search optimised)\n")
+          f"{calib_name} (what the search optimized)\n")
 
     rows = []
     fp16_eval = perplexity(comp.model, w_eval, device=comp.device)
@@ -134,7 +134,7 @@ def main():
     print(f"  Spearman rho          {rho:+.4f}", end="  ")
     print("(>0.9 means the proxy is a valid surrogate)"
           if rho >= 0.9 else
-          "-- BELOW 0.9: the search partly optimised noise; raise data.n_proxy_seq")
+          "-- BELOW 0.9: the search partly optimized noise; raise data.n_proxy_seq")
     if gap:
         print(f"  held-out / calib ppl  {min(gap):.3f} .. {max(gap):.3f}  "
               f"(median {sorted(gap)[len(gap)//2]:.3f})")

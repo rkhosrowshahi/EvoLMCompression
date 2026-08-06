@@ -90,7 +90,7 @@ def main():
             n_evaluations=comp.n_evals,
         )
 
-    run.log(f"\ndone. artefacts in {run.path}")
+    run.log(f"\ndone. artifacts in {run.path}")
     run.log(f"  figures/pareto/       {cfg.search.n_gen} frames "
             f"({', '.join(cfg.plot.formats)})")
     run.log(f"  figures/pareto_final  final front")

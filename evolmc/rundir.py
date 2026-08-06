@@ -127,7 +127,7 @@ class RunDir:
         with open(self.file("logs", f"{name}.jsonl"), "a") as f:
             f.write(json.dumps(record, default=float) + "\n")
 
-    # -- artefacts ---------------------------------------------------------
+    # -- artifacts ---------------------------------------------------------
 
     def save_config(self) -> None:
         with open(self.file("config.yaml"), "w") as f:

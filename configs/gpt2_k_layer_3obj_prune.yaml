@@ -162,8 +162,8 @@ search:
 
   # -- objectives -------------------------------------------------------------
   # Names match the keys in ModelCost.summary() (codec.py), plus `ppl_proxy`
-  # for the fitness. Direction is implied by the name: everything is minimised
-  # except the cr_* ratios, which are maximised and negated internally.
+  # for the fitness. Direction is implied by the name: everything is minimized
+  # except the cr_* ratios, which are maximized and negated internally.
   objectives: [ppl_proxy, bpw_target, cr_archival]
 
   # Sweeps K and the pruning band together along one diagonal -- see point 1
@@ -243,7 +243,7 @@ plot:
 # matched bpw_target around 6 bpw, 23% more non-dominated points), so if THIS
 # front is not better than the block-wise one, re-run with algorithm: unsga3
 # before concluding that finer granularity does not help. The two hypotheses
-# -- granularity is useless, versus the optimiser ran out of resolution -- are
+# -- granularity is useless, versus the optimizer ran out of resolution -- are
 # different, and the paper needs to separate them. Reference directions are
 # now sized for the objective count automatically (13 partitions -> 105
 # directions at M=3, not the 5151 the old pop_size-1 default would have asked

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""End-to-end wiring check: does the whole pipeline run and produce artefacts?
+"""End-to-end wiring check: does the whole pipeline run and produce artifacts?
 
 Loads a small model, sweeps the uniform-K configurations, runs a real NSGA-II
 search, and writes a complete run directory. No `datasets` dependency and no

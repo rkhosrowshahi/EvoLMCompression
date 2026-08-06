@@ -104,7 +104,7 @@ def test_binning_ordering(k):
     k-means is seeded from the uniform edges and Lloyd only decreases MSE, so
     it must dominate uniform at every K -- a regression here means the init or
     the empty-bin handling broke. Quantile binning is consistently *worst*:
-    equal-population bins crowd centroids into the dense centre of the weight
+    equal-population bins crowd centroids into the dense center of the weight
     distribution, where the residual is already small.
     """
     torch.manual_seed(0)
@@ -888,7 +888,7 @@ def test_per_tensor_ceiling_is_not_binding_on_gpt2_sized_layers():
     assert g.decode(np.ones(g.n_var))[layers[0].name].k == 8192
 
 
-# -- population initialisation ---------------------------------------------
+# -- population initialization ---------------------------------------------
 
 def test_linspace_init_is_uniform_per_individual_and_even_in_index_bits():
     """Every individual carries one K applied to all groups; the population

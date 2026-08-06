@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Re-render a finished run's figures at a different size, font or style.
 
-Reads only the run's own artefacts -- no model load, no re-evaluation -- so
+Reads only the run's own artifacts -- no model load, no re-evaluation -- so
 regenerating every figure for a paper takes seconds instead of re-running the
 search. The frozen axis box is read back from `data/plot_box.json`, so replotted
 frames stay directly comparable with the originals.
@@ -131,9 +131,9 @@ def main():
     objset, bounds = from_box(box, cfg.search.size_objective)
     xlim, ylim = tuple(box["xlim"]), tuple(box["ylim"])
     pops = load_populations(run_path, len(gens))
-    # history.npz holds the algorithm's minimisation vectors; the stored fronts
+    # history.npz holds the algorithm's minimization vectors; the stored fronts
     # and everything drawn below are real-space. Convert once, here, or a
-    # maximised objective plots as a negative number against a positive axis.
+    # maximized objective plots as a negative number against a positive axis.
     if pops is not None:
         pops = [objset.to_real(F) for F in pops]
 

@@ -39,7 +39,7 @@
 #   * the format itself, fixed per run here precisely so the comparison is
 #     between formats rather than within one
 #
-# The comparison to run afterwards is NOT hypervolume -- the two runs optimise
+# The comparison to run afterwards is NOT hypervolume -- the two runs optimize
 # different cost functions, so their HVs are not commensurable. Compare best
 # whole-model CR at a matched held-out perplexity budget, which is what
 # scripts/reprice_fronts.py tabulates.

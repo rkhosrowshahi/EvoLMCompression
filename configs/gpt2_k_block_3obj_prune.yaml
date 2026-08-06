@@ -162,8 +162,8 @@ search:
 
   # -- objectives -------------------------------------------------------------
   # Names match the keys in ModelCost.summary() (codec.py), plus `ppl_proxy`
-  # for the fitness. Direction is implied by the name: everything is minimised
-  # except the cr_* ratios, which are maximised and negated internally.
+  # for the fitness. Direction is implied by the name: everything is minimized
+  # except the cr_* ratios, which are maximized and negated internally.
   objectives: [ppl_proxy, bpw_target, cr_archival]
 
   # Sweeps K and the pruning band together along one diagonal -- see point 1

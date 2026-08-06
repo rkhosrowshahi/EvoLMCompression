@@ -146,8 +146,8 @@ search:
 
   # -- objectives -------------------------------------------------------------
   # Names match the keys in ModelCost.summary() (codec.py), plus `ppl_proxy`
-  # for the fitness. Direction is implied by the name: everything is minimised
-  # except the cr_* ratios, which are maximised and negated internally.
+  # for the fitness. Direction is implied by the name: everything is minimized
+  # except the cr_* ratios, which are maximized and negated internally.
   #
   # Two objectives here reproduces the paired 2-objective run exactly.
   objectives: [ppl_proxy, bpw_target, cr_archival]
@@ -228,7 +228,7 @@ plot:
 # poorer discriminator in 3-D than in 2-D. If this front is not better than the
 # block-wise one, re-run with algorithm: unsga3 before concluding that finer
 # granularity does not help. The two hypotheses (granularity is useless / the
-# optimiser ran out of resolution) are different, and the paper needs to
+# optimizer ran out of resolution) are different, and the paper needs to
 # separate them. See the note in the handoff about ref_dir_partitions: the
 # das-dennis default of pop_size-1 partitions is a 2-objective default and
 # produces 5151 reference directions at M=3, which is unusable -- 12 or 13

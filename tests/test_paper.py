@@ -839,7 +839,7 @@ def _hv_log(objectives=("ppl_proxy", "bpw_target"), **plot):
     if len(objset) == 2:
         hv = hv_indicator((1.0, 13.0), (22.0, 1e8), cfg.plot.yscale)
     else:
-        # (ideal, nadir) per objective; cr_archival is maximised, so its ideal
+        # (ideal, nadir) per objective; cr_archival is maximized, so its ideal
         # is the larger number.
         hv = hv_indicator_nd([(22.0, 1e8), (1.0, 13.0), (3.2, 1.1)],
                              [s.log for s in objset], objset.names)
@@ -876,23 +876,23 @@ def test_hv_reference_reports_every_objective_and_its_direction():
     can check. Each line must also say which way the objective runs."""
     out = _hv_log(objectives=("ppl_proxy", "bpw_target", "cr_archival"))
     assert "objective 3  cr_archival" in out
-    assert "MAX" in out                    # cr_* is maximised
+    assert "MAX" in out                    # cr_* is maximized
     assert out.count("min") >= 2           # ppl and bpw are not
-    # The normalised corners must have one coordinate per objective.
-    assert "(1.0, 1.0, 1.0) normalised" in out
-    assert "(0.0, 0.0, 0.0) normalised" in out
+    # The normalized corners must have one coordinate per objective.
+    assert "(1.0, 1.0, 1.0) normalized" in out
+    assert "(0.0, 0.0, 0.0) normalized" in out
 
 
 # -- objective set ---------------------------------------------------------
 
-def test_cr_objectives_are_maximised_and_round_trip():
+def test_cr_objectives_are_maximized_and_round_trip():
     from evolmc.objectives import ObjectiveSet
 
     o = ObjectiveSet(("ppl_proxy", "bpw_target", "cr_archival"))
     assert o.n_obj == 3
     values = [42.0, 4.0, 2.5]
     F = o.to_min(values)
-    # pymoo minimises, so the maximised ratio is stored negated ...
+    # pymoo minimizes, so the maximized ratio is stored negated ...
     assert list(F) == [42.0, 4.0, -2.5]
     # ... and never leaks that sign into anything user-facing.
     assert list(o.to_real(F)) == values
@@ -914,7 +914,7 @@ def test_objective_set_rejects_typos_and_duplicates():
 def test_redundant_objective_pairs_are_flagged():
     """The trap this whole mechanism exists to catch.
 
-    cr_deployable is exactly 16/bpw_model -- both normalise the same
+    cr_deployable is exactly 16/bpw_model -- both normalize the same
     target_bits_deployable -- so pairing them leaves dominance untouched and
     burns a full search budget reproducing the 2-objective front.
     """
@@ -947,8 +947,8 @@ def test_objective_labels_name_their_scope():
 
 # -- N-objective hypervolume -----------------------------------------------
 
-def test_hv_treats_maximised_objectives_by_their_corners():
-    """`bounds` carries (ideal, nadir), so a maximised objective needs no sign
+def test_hv_treats_maximized_objectives_by_their_corners():
+    """`bounds` carries (ideal, nadir), so a maximized objective needs no sign
     flip: its ideal is simply the larger number."""
     from evolmc.plotting import hv_indicator_nd
 
@@ -956,7 +956,7 @@ def test_hv_treats_maximised_objectives_by_their_corners():
     # The ideal corner fills the box; the nadir corner fills none of it.
     assert hv([[1.0, 3.0]]) == pytest.approx(1.0)
     assert hv([[10.0, 1.0]]) == pytest.approx(0.0)
-    # A point better than the box on the maximised axis is clipped, not negative.
+    # A point better than the box on the maximized axis is clipped, not negative.
     assert hv([[1.0, 99.0]]) == pytest.approx(1.0)
 
 
@@ -1062,13 +1062,13 @@ def test_bounds_put_the_ideal_corner_first_for_each_direction():
             {"ppl_proxy": 27.7, "bpw_target": 13.0, "cr_archival": 1.24}]
     bounds = derive_bounds(_objset_comp(), cfg, objset, rows, fp16_ppl=27.675)
 
-    assert bounds[0][0] < bounds[0][1]      # ppl minimised: ideal is lower
-    assert bounds[1][0] < bounds[1][1]      # bpw minimised
-    assert bounds[2][0] > bounds[2][1]      # CR MAXIMISED: ideal is higher
+    assert bounds[0][0] < bounds[0][1]      # ppl minimized: ideal is lower
+    assert bounds[1][0] < bounds[1][1]      # bpw minimized
+    assert bounds[2][0] > bounds[2][1]      # CR MAXIMIZED: ideal is higher
     assert bounds[2][0] > 2.78 and bounds[2][1] < 1.24   # padded outwards
 
 
-def test_refit_reopens_a_maximised_objective_in_its_own_direction():
+def test_refit_reopens_a_maximized_objective_in_its_own_direction():
     from evolmc.objectives import ObjectiveSet
     from evolmc.plotting import refit_bounds
 
