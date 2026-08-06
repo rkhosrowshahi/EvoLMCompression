@@ -75,7 +75,10 @@ class Compressor:
                 )
                 self.cache.put(key, (recon, stats))
             self.master.write(layer, recon)
-            cost.layers.append(price_layer(stats, self.cfg.quant.codebook_bits))
+            cost.layers.append(price_layer(
+                stats, self.cfg.quant.codebook_bits,
+                fmt=getattr(self.cfg.quant, "deployable_format", "dense"),
+                csr_span_bits=getattr(self.cfg.quant, "csr_span_bits", 4)))
 
         if self.device.type == "cuda":
             torch.cuda.synchronize()
@@ -106,7 +109,10 @@ class Compressor:
             counts = torch.zeros(k, dtype=torch.float64)
             counts[:] = layer.n_weights / k
             stats = _FakeStats(layer.name, layer.n_weights, n_groups, k, k, counts)
-            cost.layers.append(price_layer(stats, self.cfg.quant.codebook_bits))
+            cost.layers.append(price_layer(
+                stats, self.cfg.quant.codebook_bits,
+                fmt=getattr(self.cfg.quant, "deployable_format", "dense"),
+                csr_span_bits=getattr(self.cfg.quant, "csr_span_bits", 4)))
         return cost
 
     def summary(self) -> str:

@@ -50,6 +50,10 @@ def main():
                     choices=["none", "ieee", "acm", "neurips", "icml", "lncs"],
                     help="also exercise the paper-figure path at this venue")
     ap.add_argument("--usetex", action="store_true")
+    ap.add_argument("--format", default="dense",
+                    choices=["dense", "bitmap", "csr"],
+                    help="deployable storage format; 'dense' charges one index "
+                         "per weight position and is blind to pruning")
     ap.add_argument("--objectives", default=None,
                     help="comma-separated objective names, e.g. "
                          "ppl_proxy,bpw_target,cr_archival. Default is the "
@@ -63,7 +67,8 @@ def main():
         "model": {"name": args.model, "device": device, "master_device": device,
                   "dtype": "float32" if device in ("cpu", "mps") else "float16"},
         "quant": {"binning": args.binning, "granularity": "per_channel",
-                  "k_choices": [4, 8, 16, 32, 64]},
+                  "k_choices": [4, 8, 16, 32, 64],
+                  "deployable_format": args.format},
         "prune": {"enabled": True, "t_max": 1.0},
         "variables": {"k_grouping": "type", "prune_grouping": "global"},
         "data": {"seqlen": args.seqlen, "n_proxy_seq": 4, "n_eval_seq": 8},
@@ -75,7 +80,8 @@ def main():
                 "run_name": "smoke-test"
                             + ("" if args.venue == "none" else f"-{args.venue}")
                             + ("" if not args.objectives
-                               else f"-{len(args.objectives.split(','))}obj")},
+                               else f"-{len(args.objectives.split(','))}obj")
+                            + ("" if args.format == "dense" else f"-{args.format}")},
         "plot": {"every": 1, "venue": args.venue,
                  "usetex": args.usetex},
     })

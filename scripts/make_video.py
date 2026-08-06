@@ -5,8 +5,8 @@ Runs automatically at the end of every search; use this to re-encode at a
 different frame rate, or to produce a video for a run made before the encoder
 existed.
 
-    python scripts/make_video.py latest
-    python scripts/make_video.py latest --fps 8 --formats gif
+    python scripts/make_video.py gpt2-k-layer
+    python scripts/make_video.py gpt2-k-layer --fps 8 --formats gif
     python scripts/make_video.py logs/20260804-142530__gpt2__nsga2-p24g20__k-type__p-global__uniform
 """
 
@@ -24,7 +24,7 @@ from evolmc.video import find_frames, has_ffmpeg, make_video  # noqa: E402
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("run", help="run directory, run name, or 'latest'")
+    ap.add_argument("run", help="run directory or run name under logs/")
     ap.add_argument("--root", default="logs")
     ap.add_argument("--fps", type=int, default=4)
     ap.add_argument("--formats", default="mp4,gif")

@@ -143,6 +143,277 @@ def test_pruning_zeroes_the_band_and_reserves_a_codeword():
     assert st.symbol_counts[0] == inside.sum().item()
 
 
+def test_dense_format_gives_pruning_no_credit_at_all():
+    """The defect the sparse formats exist to fix, pinned so it cannot creep back.
+
+    Under `dense` every weight POSITION carries a full index, so a pruned
+    weight costs exactly what a live one does. Measured on the finished pruned
+    runs, candidates at the same bpw spanned 0.00 to 0.95 sparsity with
+    cr_deployable identical to 6 decimals. That is correct for a dense LUT
+    kernel and wrong as a statement about parameter count.
+    """
+    torch.manual_seed(0)
+    w = torch.randn(32, 4096)
+    scale = w.std(1, keepdim=True)
+    cfg = _cfgs()
+
+    sizes, sparsities = [], []
+    for t in (0.0, 0.5, 1.0, 1.5):
+        _, st = compress_layer(w, scale, k=64, t_lo=-t, t_hi=t,
+                               quant_cfg=cfg.quant, prune_cfg=cfg.prune, name="t")
+        sizes.append(price_layer(st, fmt="dense").total_deployable)
+        sparsities.append(st.sparsity)
+
+    assert sparsities[0] == 0.0 and sparsities[-1] > 0.85
+    assert len({round(s, 6) for s in sizes}) == 1, sizes
+
+
+@pytest.mark.parametrize("fmt", ["bitmap", "csr"])
+def test_sparse_formats_turn_pruning_into_real_size_reduction(fmt):
+    """What the corrected accounting has to deliver: bits fall with sparsity."""
+    torch.manual_seed(0)
+    w = torch.randn(32, 4096)
+    scale = w.std(1, keepdim=True)
+    cfg = _cfgs()
+
+    sizes, alive = [], []
+    for t in (0.0, 0.5, 1.0, 1.5):
+        _, st = compress_layer(w, scale, k=64, t_lo=-t, t_hi=t,
+                               quant_cfg=cfg.quant, prune_cfg=cfg.prune, name="t")
+        c = price_layer(st, fmt=fmt)
+        sizes.append(c.total_deployable)
+        alive.append(c.n_alive)
+
+    # Survivors fall, and so does the bill -- strictly, at every step.
+    assert all(a > b for a, b in zip(alive, alive[1:])), alive
+    assert all(a > b for a, b in zip(sizes, sizes[1:])), sizes
+    # n_alive is the real count, not a rounding of the ratio.
+    assert alive[0] == w.numel()
+    assert 0 < alive[-1] < 0.15 * w.numel()
+
+
+def test_bitmap_cost_matches_the_closed_form():
+    """n mask bits + ceil(log2(K-1)) per survivor + (K-1) codebook entries."""
+    torch.manual_seed(0)
+    w = torch.randn(16, 2048)
+    scale = w.std(1, keepdim=True)
+    cfg = _cfgs()
+    _, st = compress_layer(w, scale, k=16, t_lo=-1.0, t_hi=1.0,
+                           quant_cfg=cfg.quant, prune_cfg=cfg.prune, name="t")
+    c = price_layer(st, codebook_bits=16, fmt="bitmap")
+
+    n_alive = int(round(w.numel() * (1 - st.sparsity)))
+    expect = w.numel() + 4 * n_alive + st.n_groups * 15 * 16
+    assert c.mask_bits == pytest.approx(w.numel())
+    assert c.total_deployable == pytest.approx(expect)
+    # The reserved zero codeword is redundant once a mask records positions.
+    assert c.codebook_bits_sparse < c.codebook_bits
+
+
+def test_bitmap_loses_to_dense_when_nothing_is_pruned():
+    """The mask is a flat 1 bit/weight, so sparse is not free.
+
+    At zero sparsity bitmap pays the mask for nothing. The break-even is
+    roughly sparsity > 1/ceil(log2 K), and a paper that quotes the sparse
+    number without saying this is overstating the method.
+    """
+    torch.manual_seed(0)
+    w = torch.randn(16, 4096)
+    scale = w.std(1, keepdim=True)
+    cfg = _cfgs()
+
+    _, st0 = compress_layer(w, scale, k=256, t_lo=0.0, t_hi=0.0,
+                            quant_cfg=cfg.quant, prune_cfg=cfg.prune, name="t")
+    assert st0.sparsity == 0.0
+    assert (price_layer(st0, fmt="bitmap").total_deployable
+            > price_layer(st0, fmt="dense").total_deployable)
+
+    # Prune past the break-even and the ordering flips.
+    _, st1 = compress_layer(w, scale, k=256, t_lo=-1.0, t_hi=1.0,
+                            quant_cfg=cfg.quant, prune_cfg=cfg.prune, name="t")
+    assert st1.sparsity > 0.6
+    assert (price_layer(st1, fmt="bitmap").total_deployable
+            < price_layer(st1, fmt="dense").total_deployable)
+
+
+def test_csr_filler_count_matches_a_simulated_sparsity_pattern():
+    """Regression: the filler count was estimated by spreading the MEAN gap.
+
+    Gaps between survivors are geometric, so most are far shorter than the mean
+    and need no filler at all, while a thin tail needs several each. The linear
+    estimate `(mean_gap - 1) / 2^span` overcharged badly -- at 90% sparsity with
+    an 8-bit span the true count is zero and it claimed 7,031 per two million
+    weights -- which made wide gap fields look better than they are and pushed
+    `auto` toward spans it should not have chosen.
+    """
+    from evolmc.codec import _expected_fillers
+
+    rng = np.random.default_rng(0)
+    n = 400_000
+    for sparsity in (0.90, 0.95, 0.98):
+        mask = rng.random(n) < (1 - sparsity)
+        pos = np.flatnonzero(mask)
+        gaps = np.diff(np.concatenate([[-1], pos]))
+        n_alive = len(pos)
+        for span in (4, 6, 8):
+            true = float(np.floor(gaps / 2 ** span).sum())
+            got = _expected_fillers(n, n_alive, span)
+            # Within 10% of simulation, or within a handful of entries when the
+            # true count is near zero.
+            assert abs(got - true) <= max(0.10 * true, 20.0), (
+                sparsity, span, true, got)
+
+
+def test_wider_csr_span_is_not_free():
+    """Every survivor pays the gap field, so widening it is a real trade.
+
+    Without fillers modelled correctly a wider span looks strictly better, which
+    it is not: at moderate sparsity the extra bits per survivor cost more than
+    the fillers they avoid.
+    """
+    torch.manual_seed(0)
+    w = torch.randn(16, 4096)
+    scale = w.std(1, keepdim=True)
+    cfg = _cfgs()
+    _, st = compress_layer(w, scale, k=256, t_lo=-1.0, t_hi=1.0,
+                           quant_cfg=cfg.quant, prune_cfg=cfg.prune, name="t")
+    assert 0.6 < st.sparsity < 0.75
+
+    costs = {s: price_layer(st, fmt="csr", csr_span_bits=s).total_deployable
+             for s in (2, 4, 8, 12, 16)}
+    best = min(costs, key=costs.get)
+    assert best not in (2, 16), costs      # neither extreme wins here
+    assert costs[16] > costs[best], costs  # widening past the optimum costs
+
+
+def test_auto_format_never_loses_to_a_fixed_one():
+    """`auto` is the lower envelope, so it must beat every fixed choice.
+
+    Which format wins moves with sparsity -- bitmap's flat mask beats CSR below
+    roughly 85% and loses badly above it -- and the best CSR gap width moves
+    too, so any fixed choice is wrong somewhere. The only cost is a tag per
+    layer, which is a few bits against megabytes of indices.
+    """
+    from evolmc.codec import CSR_SPANS
+
+    torch.manual_seed(0)
+    w = torch.randn(32, 4096)
+    scale = w.std(1, keepdim=True)
+    cfg = _cfgs()
+
+    for k in (16, 256):
+        for t in (0.0, 0.5, 1.0, 1.65, 2.0):
+            _, st = compress_layer(w, scale, k=k, t_lo=-t, t_hi=t,
+                                   quant_cfg=cfg.quant, prune_cfg=cfg.prune,
+                                   name="t")
+            auto = price_layer(st, fmt="auto").total_deployable
+            fixed = [price_layer(st, fmt="bitmap").total_deployable]
+            fixed += [price_layer(st, fmt="csr", csr_span_bits=s).total_deployable
+                      for s in CSR_SPANS]
+            # Within the tag, which is the only thing auto pays extra.
+            assert auto <= min(fixed) + 64, (k, t, auto, min(fixed))
+
+
+def test_which_format_wins_flips_with_sparsity():
+    """The reason a fixed format is the wrong call.
+
+    Below the crossover the bitmask is cheap insurance; above it, one flat bit
+    per ORIGINAL position dwarfs the handful of survivors and CSR's relative
+    indices win. `auto` has to actually switch, not just pick one and stay.
+    """
+    torch.manual_seed(0)
+    w = torch.randn(32, 4096)
+    scale = w.std(1, keepdim=True)
+    cfg = _cfgs()
+
+    picks = {}
+    for t in (0.5, 1.0, 1.65, 2.2):
+        _, st = compress_layer(w, scale, k=256, t_lo=-t, t_hi=t,
+                               quant_cfg=cfg.quant, prune_cfg=cfg.prune, name="t")
+        picks[round(st.sparsity, 2)] = price_layer(st, fmt="auto").fmt
+
+    assert len(set(picks.values())) > 1, picks
+    lo = min(picks), max(picks)
+    assert picks[lo[0]].startswith("bitmap"), picks
+    assert picks[lo[1]].startswith("csr"), picks
+
+
+def test_bitmap_has_a_one_bit_floor_and_csr_does_not():
+    """Why the choice is qualitative, not just a few percent.
+
+    The mask is one bit per ORIGINAL weight whatever the sparsity, so bitmap
+    cannot go below 1.0 bpw however much is pruned. CSR stores nothing for a
+    pruned weight and has no such floor. That is the whole reason the bitmap
+    configs pin plot.xlim_min at 1.0.
+    """
+    from evolmc.codec import ModelCost
+
+    torch.manual_seed(0)
+    w = torch.randn(32, 4096)
+    scale = w.std(1, keepdim=True)
+    cfg = _cfgs()
+    _, st = compress_layer(w, scale, k=16, t_lo=-2.5, t_hi=2.5,
+                           quant_cfg=cfg.quant, prune_cfg=cfg.prune, name="t")
+    assert st.sparsity > 0.97
+
+    bpw = lambda f, **kw: ModelCost(
+        layers=[price_layer(st, fmt=f, **kw)], n_untouched_weights=0).bpw_target
+    assert bpw("bitmap") > 1.0
+    assert bpw("csr", csr_span_bits=8) < 1.0
+
+
+def test_param_reduction_is_reported_separately_from_size():
+    """Parameter count and storage are different claims and must not be mixed.
+
+    They do not even move together: quantization compounds with pruning, so
+    the size ratio can exceed the parameter ratio, while the untouched fp16
+    embeddings drag the whole-model figure the other way. Reporting one as if
+    it were the other is wrong in both directions.
+    """
+    from evolmc.codec import ModelCost
+
+    torch.manual_seed(0)
+    w = torch.randn(32, 4096)
+    scale = w.std(1, keepdim=True)
+    cfg = _cfgs()
+    _, st = compress_layer(w, scale, k=16, t_lo=-1.65, t_hi=1.65,
+                           quant_cfg=cfg.quant, prune_cfg=cfg.prune, name="t")
+    mc = ModelCost(layers=[price_layer(st, fmt="bitmap")],
+                   n_untouched_weights=w.numel() // 2)
+
+    assert st.sparsity > 0.88
+    # Target weights are ~90% gone, but a third of the checkpoint is untouched,
+    # so the whole-model parameter reduction is far below the layer sparsity.
+    assert 0.55 < mc.param_reduction < 0.68
+    # The two are genuinely different numbers, not one restated.
+    assert abs(mc.cr_deployable - 1.0 / (1.0 - mc.param_reduction)) > 0.02
+    assert mc.n_alive_total < mc.n_total_weights
+
+
+def test_the_bitmask_dominates_storage_at_high_sparsity():
+    """Why pruning saturates: past a point you are storing addresses, not weights.
+
+    At 90% sparsity with 4-bit indices the mask is one flat bit per ORIGINAL
+    position while the surviving indices are 4 bits per SURVIVOR, so the mask
+    ends up the majority of the layer's deployable cost. Pruning harder shrinks
+    the smaller term and leaves the larger one untouched, which is the ceiling
+    on what unstructured sparsity can buy in this format.
+    """
+    torch.manual_seed(0)
+    w = torch.randn(32, 4096)
+    scale = w.std(1, keepdim=True)
+    cfg = _cfgs()
+    _, st = compress_layer(w, scale, k=16, t_lo=-1.65, t_hi=1.65,
+                           quant_cfg=cfg.quant, prune_cfg=cfg.prune, name="t")
+    c = price_layer(st, fmt="bitmap")
+
+    assert c.mask_bits / c.total_deployable > 0.6
+    # CSR pays a gap field per survivor instead of a bit per position, so it
+    # is the cheaper format exactly in this regime.
+    assert (price_layer(st, fmt="csr").total_deployable
+            < c.total_deployable)
+
+
 def test_pruning_moves_the_archival_objective_and_not_the_deployable_one():
     """The premise of the *_3obj_prune configs, checked at objective level.
 

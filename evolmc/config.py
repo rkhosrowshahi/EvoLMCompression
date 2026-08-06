@@ -77,6 +77,33 @@ class QuantConfig:
     k_choices: tuple[int, ...] = (2, 4, 8, 16, 32, 64, 128, 256)
     # Bit width used to store each codebook entry.
     codebook_bits: int = 16
+    # How the DEPLOYABLE side stores indices. This decides whether pruning is
+    # a parameter reduction or only an entropy-coding trick:
+    #   "dense"  -- one index per weight POSITION. A pruned weight costs the
+    #               same as a live one, so sparsity changes the deployable
+    #               size by exactly zero. Right for a dense LUT kernel, wrong
+    #               as a claim about parameter count.
+    #   "bitmap" -- 1 bit/position saying alive or dead, then one index per
+    #               SURVIVOR. Pruning now shrinks the model.
+    #   "csr"    -- Deep Compression's relative-index scheme: index + gap per
+    #               survivor, with fillers when a gap exceeds the span.
+    #   "auto"   -- per layer, the cheapest of bitmap and CSR at every gap
+    #               width in codec.CSR_SPANS, plus a tag recording the choice.
+    #               Which wins depends strongly on sparsity: bitmap's flat
+    #               1 bit/position beats CSR below roughly 85% sparsity and
+    #               loses badly above it, and the best gap width moves too.
+    # Default stays "dense" so every finished run reprices identically.
+    deployable_format: Literal["dense", "bitmap", "csr", "auto"] = "dense"
+    # Gap field width for "csr". 4 bits spans 16 positions before a filler.
+    #
+    # null selects the width PER LAYER from codec.CSR_SPANS, which is what a
+    # CSR run should use: the optimum tracks sparsity (4 bits around 80%, 6 at
+    # 90-95%, 8 at 98%), so any fixed value handicaps the format at exactly the
+    # sparsities where it beats bitmap. Costs a 6-bit tag per layer.
+    #
+    # "auto" ignores this and sweeps the widths itself, since it is already
+    # choosing between bitmap and CSR.
+    csr_span_bits: int | None = 4
     # Reconstructions cached per (layer, K). Only active when pruning is off,
     # where the result is deterministic. Each entry holds a full weight tensor,
     # so the cap bounds memory: n_entries x layer_size x 4 bytes.

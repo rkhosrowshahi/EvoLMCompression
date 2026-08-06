@@ -13,7 +13,7 @@ the front survives, and the Spearman correlation says whether the cheap proxy
 ranked candidates the way the full metric does at all.
 
     python scripts/run_eval.py configs/gpt2_k_layer.yaml logs/gpt2-k-layer
-    python scripts/run_eval.py configs/gpt2_k_layer.yaml latest --skip-baselines
+    python scripts/run_eval.py configs/gpt2_k_layer.yaml logs/gpt2-k-layer --skip-baselines
 """
 
 from __future__ import annotations
@@ -60,7 +60,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("config")
     ap.add_argument("run", nargs="?", default=None,
-                    help="run directory (or 'latest'); results go to data/results.csv")
+                    help="run directory; results go to its data/results.csv")
     ap.add_argument("--out", default=None)
     ap.add_argument("--skip-baselines", action="store_true")
     ap.add_argument("--no-plots", action="store_true")

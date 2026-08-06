@@ -1,0 +1,192 @@
+# GPT-2, weight sharing + PRUNING, sparse-aware costing -- block-wise K (12 K + 2 prune = 14 vars)
+#
+# The rerun. Six configs, three groupings x {2, 3} objectives, all with pruning
+# on and all priced under the BITMAP format so that pruning actually reduces
+# the model.
+#
+#   gpt2_k_{global,block,layer}_prune_bitmap_2obj.yaml   PPL + BPW
+#   gpt2_k_{global,block,layer}_prune_bitmap_3obj.yaml   PPL + BPW + ACR
+#
+# -- WHY THIS RERUN EXISTS ----------------------------------------------------
+#
+# The earlier pruned runs were priced under `dense`, which charges one index per
+# weight POSITION. A pruned weight cost exactly what a live one did, so the size
+# objective was blind to sparsity: candidates spanning 0.000 to 0.953 sparsity
+# at the same bpw had cr_deployable identical to SIX DECIMALS.
+#
+# The consequence was not a bad search, it was a bad question. Perplexity saw
+# the full damage of pruning (at 8 bpw, 58 -> 3723 as sparsity rose), the size
+# objective saw nothing, and the archival objective saw +21%. NSGA-II was shown
+# a knob that costs a great deal and returns almost nothing, so it correctly
+# turned the knob down: median front sparsity came out at 0.13 to 0.29.
+#
+# `deployable_format: bitmap` fixes that. One bit per position records alive or
+# dead, then one index per SURVIVOR:
+#
+#   bits = n  +  ceil(log2(K-1)) * n_alive  +  G * (K-1) * b_cb
+#
+# -- THE COUPLING THIS CREATES ------------------------------------------------
+#
+# The mask is a flat 1 bit/weight, so pruning only pays above
+#
+#   sparsity > 1 / ceil(log2 K)
+#
+# Below that the mask costs more than the indices it removes. Measured on the
+# dense fronts, bitmap beat dense in 0-37% of cases below the break-even and
+# 84-100% above it -- a sharp threshold, not a tendency.
+#
+# So K and the pruning band are COUPLED under this cost, which they were not
+# under dense: prune hard only where K is large enough to pay for the mask, and
+# at K=2 (1 index bit) never prune, since break-even would need sparsity > 1.
+# Expect sparsity and K to come out positively correlated. The dense runs showed
+# the opposite (rho = -0.59 at global), and that reversal is a result to report.
+#
+# Conveniently, `init: linspace` already sweeps K and t together along one
+# diagonal -- low K with no pruning, high K with heavy pruning -- which is
+# exactly the direction the break-even rule favours. Under dense that diagonal
+# was an awkward artefact; here it is aligned with where pruning pays.
+#
+# -- OBJECTIVES ---------------------------------------------------------------
+#
+# PPL  proxy perplexity                                            (min)
+# BPW  bits per weight, target matrices, BITMAP-priced             (min)
+#
+# The paired *_3obj config adds ACR (archival CR, whole checkpoint, MAX). Both
+# are run because the evidence is genuinely mixed and the pair settles it:
+#
+#   * rho(BPW, ACR) RISES from 0.970 to 0.986 once BPW is sparsity-aware --
+#     both now respond to the same knob, so ACR looks MORE redundant, not less.
+#   * but the conditional screen leaves 6-11% ACR spread among the best-
+#     perplexity half at matched size, against 1.8-6.3% in the unpruned case.
+#   * and rho(ACR, perplexity) is +0.7 to +0.99, so that spread is bought by
+#     accepting worse quality at the same deployable size.
+#
+# The 2-objective run is the control. If the 3-objective front is not better on
+# (PPL, BPW) after projection, ACR is costing hypervolume for members that are
+# dominated on the axes that matter, exactly as it did without pruning.
+#
+# -- THE PLOT BOX, WHICH BITMAP BREAKS IF LEFT ALONE --------------------------
+#
+# The baseline sweep evaluates uniform-K points at t=0, i.e. ZERO sparsity, so
+# under bitmap its cheapest point is K=2 at 2.0 bpw (1 mask bit + 1 index bit).
+# Pruned candidates go far below that -- K=2 at 95% sparsity costs 1.045 bpw.
+# A frozen x box derived from the baselines alone would clip every heavily
+# pruned candidate onto the spine, which is exactly the region of interest.
+#
+# `xlim_min: 1.0` pins it at the hard floor instead: the mask is one bit per
+# weight and cannot be avoided, so bpw_target >= 1.0 under bitmap, the same way
+# perplexity >= 1.0. Both bounds are theoretical, not fitted.
+
+model:
+  name: gpt2
+  dtype: float16
+  device: cuda
+  master_device: cuda
+
+quant:
+  granularity: per_tensor
+  binning: uniform
+  k_encoding: integer
+  k_min: 2
+  k_max: 8192
+  k_choices: [2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192]
+  codebook_bits: 16
+  # <-- THE LINE THAT MAKES PRUNING COUNT. "dense" charges one index per weight
+  # position and is blind to sparsity; "bitmap" stores only survivors and pays
+  # a 1 bit/weight mask. See scripts/reprice_fronts.py for the comparison, and
+  # note that per-layer format selection was measured to buy 0.0-0.7% here, so
+  # one format for the whole model is the right call.
+  deployable_format: bitmap
+  csr_span_bits: 4           # unused while deployable_format is bitmap
+  cache_entries: 32          # irrelevant: pruning disables the cache entirely
+
+prune:
+  enabled: true
+  mode: sigma                # threshold = t x per-output-row std
+  # Sigma to sparsity on a roughly Gaussian layer:
+  #   t=0.25 -> 19.7%   t=1.00 -> 68.3%   t=1.64 -> 89.9%
+  #   t=0.50 -> 38.3%   t=1.28 -> 79.9%   t=2.00 -> 95.4%
+  # Kept at 2.0 because bitmap finally rewards the high-sparsity end, which the
+  # dense runs had no reason to visit.
+  t_max: 2.0
+  # Still true, and still the reason pruning is invisible to the INDEX WIDTH:
+  # the reserved zero codeword keeps it at ceil(log2 K). Under bitmap the mask
+  # carries the zeros instead, so survivors share K-1 centroids and the saving
+  # lands where it should.
+  reserve_zero_codeword: true
+
+variables:
+  k_grouping: block                         # <-- THE ONLY LINE THAT DIFFERS across the sweep
+  # One threshold for the whole model, so k_grouping stays the only thing that
+  # varies. This is also why per-layer format selection was worthless: sparsity
+  # comes out near-uniform, so every layer wants the same format. Moving this to
+  # `block` is the most promising follow-up, at +24 variables.
+  prune_grouping: global
+
+data:
+  calib_dataset: c4
+  eval_dataset: wikitext2
+  seqlen: 1024
+  n_proxy_seq: 8
+  n_eval_seq: 64
+
+search:
+  algorithm: nsga2
+  pop_size: 100
+  n_gen: 100
+  seed: 0
+
+  # PPL + BPW + ACR. The paired _2obj config is the control:
+  # if this front is not better on (PPL, BPW) after projecting
+  # onto those two axes, ACR is buying members that are dominated
+  # on the axes that matter.
+  objectives: [ppl_proxy, bpw_target, cr_archival]
+
+  init: linspace
+  warm_start: true
+  baseline_sweep: true       # 13 fixed-K reference points, all at t=0
+  size_objective: bpw_target
+
+  crossover_prob: 0.9
+  crossover_prob_var: 1.0
+  crossover_eta: 15
+  mutation_prob: 1.0         # 0.9 in the global config
+  mutation_prob_var: 1.0
+  mutation_eta: 20
+  eliminate_duplicates: true
+  n_offsprings: null
+  ref_dir_partitions: null
+  moead_neighbors: 15
+  moead_prob_neighbor_mating: 0.7
+
+log:
+  root: logs
+  run_name: gpt2-k-block-prune-bitmap-3obj-np100-ng100
+  checkpoint_every: 10
+  save_history: true
+
+plot:
+  enabled: true
+  every: 1
+  formats: [png, pdf]
+  dpi: 150
+  style: paper
+  yscale: log
+  ylim_min: 1.0              # perplexity floor, exp(cross-entropy) >= 1
+  ylim_min_ratio: 0.8        # unused while ylim_min is set
+  ylim_pad: 0.03
+  ylim_max: null
+  ylim_max_ratio: null
+  # BITMAP floor: the mask is 1 bit per weight and cannot be avoided, so
+  # bpw_target >= 1.0. Pinned because the baseline sweep runs at zero sparsity
+  # and bottoms out at 2.0, which would clip every heavily pruned candidate.
+  xlim_min: 1.0
+  xlim_max: null
+  legend_alpha: 0.3
+  marker_pt: 3.5
+  baseline_label: exponential search (baseline)
+  annotation_pt: null
+  venue: ieee
+  width: column
+  video: [mp4, gif]
+  video_fps: 6

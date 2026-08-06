@@ -21,7 +21,9 @@ Every run gets its own timestamped, self-describing directory under `logs/`:
         pareto_final.png|pdf
         convergence.png|pdf
 
-`logs/latest` is a symlink to the most recent run.
+Scripts take a run by directory name or path. There is no `latest` alias: the
+directory names already say which run they are, and an alias that points
+somewhere invisible is worse than typing the name.
 """
 
 from __future__ import annotations
@@ -80,7 +82,6 @@ class RunDir:
 
         self._log_fh = open(self.file("logs", "run.log"), "a", buffering=1)
         self._t0 = time.perf_counter()
-        self._link_latest()
         self.save_config()
 
     def _free_name(self, name: str) -> tuple[str, str]:
@@ -165,24 +166,18 @@ class RunDir:
         except Exception:  # pragma: no cover
             pass
 
-    # -- convenience -------------------------------------------------------
-
-    def _link_latest(self) -> None:
-        link = os.path.join(self.root, "latest")
-        try:
-            if os.path.islink(link) or os.path.exists(link):
-                os.remove(link)
-            os.symlink(os.path.abspath(self.path), link, target_is_directory=True)
-        except OSError:  # pragma: no cover - symlinks may be unavailable
-            pass
-
     def __repr__(self) -> str:
         return f"RunDir({self.path})"
 
 
 def find_run(spec: str, root: str = "logs") -> str:
-    """Resolve a run directory from a path, a run name, or 'latest'."""
+    """Resolve a run directory from a path or a run name under `root`."""
     for candidate in (spec, os.path.join(root, spec)):
         if os.path.isdir(candidate):
             return candidate
-    raise FileNotFoundError(f"no run directory matching {spec!r} under {root}/")
+    known = sorted(n for n in os.listdir(root)
+                   if os.path.exists(os.path.join(root, n, "config.yaml"))) \
+        if os.path.isdir(root) else []
+    hint = ("\n  runs found: " + ", ".join(known)) if known else ""
+    raise FileNotFoundError(
+        f"no run directory matching {spec!r} under {root}/{hint}")

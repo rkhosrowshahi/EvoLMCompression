@@ -3,7 +3,7 @@
 
     python scripts/run_search.py configs/dev_gpt2.yaml
     python scripts/run_search.py configs/pythia_410m.yaml --name ablation-kmeans
-    python scripts/run_search.py configs/llama2_7b.yaml --resume logs/latest
+    python scripts/run_search.py configs/llama2_7b.yaml --resume gpt2-k-layer
 
 Everything for the run lands in one timestamped directory under logs/.
 """

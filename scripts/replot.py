@@ -7,13 +7,13 @@ search. The frozen axis box is read back from `data/plot_box.json`, so replotted
 frames stay directly comparable with the originals.
 
     # camera-ready IEEE single-column figures (CEC, TEVC)
-    python scripts/replot.py latest --venue ieee --width column
+    python scripts/replot.py gpt2-k-layer --venue ieee --width column
 
     # GECCO / ACM, full page width, real LaTeX text
-    python scripts/replot.py latest --venue acm --width page --usetex
+    python scripts/replot.py gpt2-k-layer --venue acm --width page --usetex
 
     # just the final front and convergence, no per-generation frames
-    python scripts/replot.py latest --venue ieee --no-frames
+    python scripts/replot.py gpt2-k-layer --venue ieee --no-frames
 """
 
 from __future__ import annotations

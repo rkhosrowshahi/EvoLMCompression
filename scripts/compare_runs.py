@@ -5,7 +5,7 @@ Built for the granularity ablation (global vs block-wise vs layer-wise K), but
 works for any set of runs over the same model and objective.
 
     python scripts/compare_runs.py gpt2-k-global gpt2-k-block gpt2-k-layer
-    python scripts/compare_runs.py latest prev --venue ieee --name my-ablation
+    python scripts/compare_runs.py gpt2-k-block gpt2-k-layer --venue ieee --name my-ablation
 
 Hypervolume is **recomputed for every run on one common box**, not read from
 each run's log. Stored HV is normalised by that run's own axis box, and the
