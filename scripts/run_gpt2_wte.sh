@@ -2,7 +2,9 @@
 # GPT-2 with the tied token embedding IN the compressed target set.
 #
 # Six runs: three K groupings x {weight sharing, weight sharing + pruning}.
-# All NSGA-II, pop 100, 1000 generations.
+# All NSGA-II, pop 100. The generation budget tracks the dimensionality:
+# global runs 100 generations (1 or 3 variables, saturated long before that),
+# block and layer run 1000 (13/15 and 49/51 variables).
 #
 #   bash scripts/run_gpt2_wte.sh
 #   bash scripts/run_gpt2_wte.sh --only share
@@ -116,13 +118,29 @@ from evolmc.config import Config
 from evolmc.models import count_untouched_weights, discover_targets
 from evolmc.grouping import Genome
 
-EXPECT_VARS = {
-    "gpt2_k_global_wte.yaml": 1,
-    "gpt2_k_block_wte.yaml": 13,
-    "gpt2_k_layer_wte.yaml": 49,
-    "gpt2_k_global_wte_prune_bitmap_2obj.yaml": 3,
-    "gpt2_k_block_wte_prune_bitmap_2obj.yaml": 15,
-    "gpt2_k_layer_wte_prune_bitmap_2obj.yaml": 51,
+# (n_var, n_gen) per config. The generation budget is NOT uniform across the
+# sweep, and that is deliberate:
+#
+#   global  1 or 3 variables    100 gen  =  10,000 evals
+#   block  13 or 15 variables  1000 gen  = 100,000 evals
+#   layer  49 or 51 variables  1000 gen  = 100,000 evals
+#
+# One K over 8,191 integers is a 1-D space whose reachable front is a single
+# curve, and the baseline sweep already samples 13 points along it. 10,000
+# evaluations saturate that long before generation 100, so spending 100,000 on
+# it would buy nothing and cost as much as the layer run that actually needs
+# them. The budget tracks the dimensionality, not the sweep.
+#
+# Checked rather than merely reported because a wrong budget here is invisible
+# until the run finishes. Note this checks the FILE: run_search.py's --n-gen
+# overrides it, so a `--n-gen 5` trial passes this and still runs 5 generations.
+EXPECT = {
+    "gpt2_k_global_wte.yaml": (1, 100),
+    "gpt2_k_block_wte.yaml": (13, 1000),
+    "gpt2_k_layer_wte.yaml": (49, 1000),
+    "gpt2_k_global_wte_prune_bitmap_2obj.yaml": (3, 100),
+    "gpt2_k_block_wte_prune_bitmap_2obj.yaml": (15, 1000),
+    "gpt2_k_layer_wte_prune_bitmap_2obj.yaml": (51, 1000),
 }
 
 model = AutoModelForCausalLM.from_pretrained("gpt2", dtype=torch.float32)
@@ -135,7 +153,8 @@ if model.lm_head.weight is not model.transformer.wte.weight:
     )
 
 bad = []
-for name, n_var in EXPECT_VARS.items():
+budget = []
+for name, (n_var, n_gen) in EXPECT.items():
     path = f"configs/{name}"
     cfg = Config.from_yaml(path)
 
@@ -143,8 +162,20 @@ for name, n_var in EXPECT_VARS.items():
         bad.append(f"{name}: exclude_patterns still contains 'lm_head'")
     if cfg.search.algorithm != "nsga2":
         bad.append(f"{name}: algorithm is {cfg.search.algorithm!r}, expected nsga2")
-    if cfg.search.n_gen != 1000:
-        bad.append(f"{name}: n_gen is {cfg.search.n_gen}, expected 1000")
+    if cfg.search.n_gen != n_gen:
+        bad.append(f"{name}: n_gen is {cfg.search.n_gen}, expected {n_gen}")
+    # The run directory is named from log.run_name, so a stale ngNNN suffix
+    # mislabels the results permanently and silently.
+    if f"ng{cfg.search.n_gen}" not in cfg.log.run_name:
+        bad.append(f"{name}: run_name {cfg.log.run_name!r} does not carry "
+                   f"'ng{cfg.search.n_gen}'")
+    # every: 1 at 1000 gen writes 2,000 files; every: 10 at 100 gen leaves a
+    # 10-frame video. Both groupings should yield ~100 frames.
+    frames = cfg.search.n_gen // max(cfg.plot.every, 1)
+    if cfg.plot.enabled and not (50 <= frames <= 200):
+        bad.append(f"{name}: plot.every {cfg.plot.every} at n_gen "
+                   f"{cfg.search.n_gen} gives {frames} frames, expected ~100")
+    budget.append((name, cfg.search.pop_size, cfg.search.n_gen))
     if "cr_deployable" not in cfg.search.report_metrics:
         bad.append(f"{name}: cr_deployable missing from report_metrics")
     # cr_deployable must stay a REPORTED metric. With untouched down to 14.5
@@ -174,11 +205,15 @@ cfg = Config.from_yaml("configs/gpt2_k_block_wte.yaml")
 targets = discover_targets(model, cfg.model.exclude_patterns)
 tw = sum(t.n_weights for t in targets)
 un = count_untouched_weights(model, targets)
-print(f"preflight ok: 6 configs, nsga2, n_gen 1000, lm_head tied to wte")
+print(f"preflight ok: 6 configs, nsga2, lm_head tied to wte")
 print(f"  targets    {len(targets)}  ({tw:,} weights, "
       f"{100 * tw / (tw + un):.2f}% of checkpoint)")
 print(f"  untouched  {un:,} weights ({100 * un / (tw + un):.2f}%)  "
       f"-> CR ceiling {(tw + un) / un:.1f}x")
+print("  budget     (from the configs; --n-gen / --pop override these)")
+for name, pop, n_gen in budget:
+    print(f"    {name:<44} pop {pop:>4} x {n_gen:>5} gen = "
+          f"{pop * n_gen:>7,} evals")
 PY
 
 RUN_DIRS=()

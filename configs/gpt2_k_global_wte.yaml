@@ -150,16 +150,17 @@ search:
 
 log:
   root: logs
-  run_name: gpt2-k-global-wte-np100-ng1000
+  run_name: gpt2-k-global-wte-np100-ng100
   checkpoint_every: 10
   save_history: true
 
 plot:
   enabled: true
-  # 10, not 1. At n_gen 1000 a per-generation frame would write 2,000 files and
-  # a 167-second video; every 10 gives the same 100 frames the ng100 runs
-  # produced, so the videos stay comparable and the I/O stays sane.
-  every: 10
+  # 1, because this config runs 100 generations, not the 1000 of the block and
+  # layer configs. Those use every: 10 to hold the frame count near 100; at
+  # n_gen 100 the same setting would leave a 10-frame, 1.7-second video. Both
+  # groupings should end up with ~100 frames so the videos stay comparable.
+  every: 1
   formats: [png, pdf]
   dpi: 150
   style: paper
