@@ -125,7 +125,7 @@ data:
 search:
   algorithm: nsga2
   pop_size: 100
-  n_gen: 1000
+  n_gen: 100
   seed: 0
   objectives: [ppl_proxy, bpw_target]
   # cr_deployable is where this change is visible; bpw_target barely moves.
