@@ -49,6 +49,28 @@ class Objective:
     def axis_label(self) -> str:
         return f"{self.label} ({self.scope})" if self.scope else self.label
 
+    @property
+    def arrow(self) -> str:
+        r"""Direction of IMPROVEMENT, the usual convention in results tables.
+
+        Down for a minimized objective, up for a maximized one, so it reads as
+        "lower is better" / "higher is better" rather than restating the
+        optimizer's sign convention. Mathtext, so it renders identically with
+        and without `usetex`.
+        """
+        return r"$\downarrow$" if self.sense == MINIMIZE else r"$\uparrow$"
+
+    @property
+    def plot_label(self) -> str:
+        r"""Axis label carrying scope and direction in ONE parenthesis.
+
+        `bits per weight (target, $\downarrow$)` rather than stacking
+        two bracketed groups, which reads as an afterthought on a figure.
+        """
+        if self.scope:
+            return f"{self.label} ({self.scope}, {self.arrow})"
+        return f"{self.label} ({self.arrow})"
+
     def better(self, a: float, b: float) -> bool:
         return (a < b) if self.sense == MINIMIZE else (a > b)
 
@@ -63,26 +85,26 @@ REGISTRY: dict[str, Objective] = {o.name: o for o in (
 
     # -- deployable: fixed-width indices + codebooks ------------------------
     Objective("bpw_target", MINIMIZE, "bits per weight",
-              "target matrices", "deployable"),
+              "target", "deployable"),
     Objective("bpw_model", MINIMIZE, "bits per weight",
-              "full checkpoint", "deployable"),
-    Objective("cr_deployable", MAXIMIZE, "compression ratio",
-              "full checkpoint", "deployable"),
+              "whole", "deployable"),
+    Objective("cr_deployable", MAXIMIZE, "CR",
+              "whole", "deployable"),
     Objective("size_mb_deployable", MINIMIZE, "size (MB)",
-              "full checkpoint", "deployable"),
+              "whole", "deployable"),
 
-    # -- archival: entropy-coded indices + codebooks + code-length tables ---
-    Objective("bpw_target_archival", MINIMIZE, "bits per weight, entropy-coded",
-              "target matrices", "archival"),
-    Objective("bpw_model_archival", MINIMIZE, "bits per weight, entropy-coded",
-              "full checkpoint", "archival"),
-    Objective("cr_archival", MAXIMIZE, "compression ratio, entropy-coded",
-              "full checkpoint", "archival"),
+    # -- archival: Huffman-coded indices + codebooks + code-length tables ---
+    Objective("bpw_target_archival", MINIMIZE, "bits per weight, Huffman",
+              "target", "archival"),
+    Objective("bpw_model_archival", MINIMIZE, "bits per weight, Huffman",
+              "whole", "archival"),
+    Objective("cr_archival", MAXIMIZE, "ACR",
+              "whole", "archival"),
     Objective("size_mb_archival", MINIMIZE, "size (MB)",
-              "full checkpoint", "archival"),
+              "whole", "archival"),
 
     # -- neither ------------------------------------------------------------
-    Objective("sparsity", MAXIMIZE, "sparsity", "target matrices", ""),
+    Objective("sparsity", MAXIMIZE, "sparsity", "target", ""),
 )}
 
 DEFAULT = ("ppl_proxy", "bpw_target")

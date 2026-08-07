@@ -37,23 +37,37 @@ from evolmc.plotting import (  # noqa: E402
 )
 from evolmc.rundir import find_run  # noqa: E402
 
-FIELDS = [
-    "tag", "ppl_eval", "ppl_calib", "bpw_target", "bpw_target_archival",
-    "bpw_model", "cr_deployable", "cr_archival", "sparsity", "mean_k_used",
-    "size_mb_original", "size_mb_deployable", "size_mb_archival",
-]
+# Columns that are not part of the cost accounting. Everything else is taken
+# from ModelCost.summary() as it comes, rather than from an allowlist: a fixed
+# list silently drops any field added to the accounting later, which is exactly
+# what happened to param_reduction, n_alive_total, cr_dense, size_mb_dense and
+# bpw_model_archival -- the columns that make pruning visible.
+LEAD = ["tag", "ppl_eval", "ppl_calib"]
 
 
 def evaluate_genome(comp, x, w_eval, w_calib, tag):
     """Score one genome on both corpora from a single quantization."""
     cand = comp.apply(x)
-    row = {
+    return {
         "tag": tag,
         "ppl_eval": round(perplexity(comp.model, w_eval, device=comp.device), 4),
         "ppl_calib": round(perplexity(comp.model, w_calib, device=comp.device), 4),
+        **{k: round(v, 5) for k, v in cand.cost.summary().items()},
     }
-    row.update({k: round(v, 5) for k, v in cand.cost.summary().items()})
-    return {k: row.get(k, "") for k in FIELDS}
+
+
+def write_results(path, rows):
+    """Write every column any row carries, leads first, cost fields in order."""
+    seen = list(LEAD)
+    for r in rows:
+        for k in r:
+            if k not in seen:
+                seen.append(k)
+    with open(path, "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=seen, restval="")
+        w.writeheader()
+        w.writerows(rows)
+    return seen
 
 
 def main():
@@ -82,9 +96,17 @@ def main():
     rows = []
     fp16_eval = perplexity(comp.model, w_eval, device=comp.device)
     fp16_calib = perplexity(comp.model, w_calib, device=comp.device)
-    rows.append({**{k: "" for k in FIELDS}, "tag": "fp16",
+    # The uncompressed reference. Its cost fields are known exactly rather than
+    # measured, so they are stated rather than left blank: nothing is quantized,
+    # nothing is pruned, and every ratio is 1.
+    rows.append({"tag": "fp16",
                  "ppl_eval": round(fp16_eval, 4), "ppl_calib": round(fp16_calib, 4),
-                 "bpw_target": 16.0, "bpw_model": 16.0, "cr_deployable": 1.0})
+                 "bpw_target": 16.0, "bpw_target_archival": 16.0,
+                 "bpw_model": 16.0, "bpw_model_archival": 16.0,
+                 "cr_deployable": 1.0, "cr_archival": 1.0, "cr_dense": 1.0,
+                 "sparsity": 0.0, "param_reduction": 0.0,
+                 "n_alive_total": float(comp.master.n_target_weights
+                                        + comp.n_untouched)})
     print(f"{'':<22}{eval_name:>12}{calib_name:>12}")
     print(f"{'fp16':<22}{fp16_eval:>12.3f}{fp16_calib:>12.3f}")
 
@@ -114,11 +136,8 @@ def main():
 
     out = args.out or os.path.join(run_path or ".", "data", "results.csv")
     os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
-    with open(out, "w", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=FIELDS)
-        w.writeheader()
-        w.writerows(rows)
-    print(f"\nwrote {out}")
+    cols = write_results(out, rows)
+    print(f"\nwrote {out}  ({len(cols)} columns, {len(rows)} rows)")
 
     if not front:
         return

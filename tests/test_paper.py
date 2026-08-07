@@ -940,9 +940,33 @@ def test_objective_labels_name_their_scope():
     from evolmc.objectives import ObjectiveSet
 
     o = ObjectiveSet(("ppl_proxy", "bpw_target", "cr_archival"))
-    assert o[1].axis_label == "bits per weight (target matrices)"
-    assert o[2].axis_label == "compression ratio, entropy-coded (full checkpoint)"
+    assert o[1].axis_label == "bits per weight (target)"
+    assert o[2].axis_label == "ACR (whole)"
     assert o[0].axis_label == "proxy perplexity"   # no scope to name
+
+
+def test_plot_labels_mark_the_direction_of_improvement():
+    """Arrow convention: down means lower is better, up means higher is better.
+
+    It marks IMPROVEMENT, not the optimizer's sign, so perplexity and bits per
+    weight point down while a compression ratio points up. Getting this backward
+    on a figure is worse than omitting it.
+    """
+    from evolmc.objectives import ObjectiveSet
+
+    o = ObjectiveSet(("ppl_proxy", "bpw_target", "cr_archival"))
+    assert o[0].arrow == r"$\downarrow$"      # perplexity: minimized
+    assert o[1].arrow == r"$\downarrow$"      # bits per weight: minimized
+    assert o[2].arrow == r"$\uparrow$"        # compression ratio: maximized
+
+    # Scope and direction share ONE parenthesis rather than stacking two.
+    assert o[1].plot_label == r"bits per weight (target, $\downarrow$)"
+    assert o[0].plot_label == r"proxy perplexity ($\downarrow$)"
+    assert o[0].plot_label.count("(") == 1
+
+    # Every registered objective carries one, and only the two directions.
+    from evolmc.objectives import REGISTRY
+    assert {s.arrow for s in REGISTRY.values()} == {r"$\downarrow$", r"$\uparrow$"}
 
 
 # -- N-objective hypervolume -----------------------------------------------

@@ -340,8 +340,8 @@ class ParetoPlotter:
         # scope will try to reconcile 16/f2 against f3 and conclude the
         # accounting is broken.
         if objset is not None:
-            self.ylabel_base = objset[0].axis_label
-            self.xlabel = objset[1].axis_label
+            self.ylabel_base = objset[0].plot_label
+            self.xlabel = objset[1].plot_label
         else:
             self.ylabel_base = "proxy perplexity"
             self.xlabel = "bits per weight"
@@ -426,7 +426,7 @@ class ParetoPlotter:
         self._finish(ax, gen, n_evals, hv, off, minimal)
         if mappable is not None:
             cb = fig.colorbar(mappable, ax=ax, pad=0.02, fraction=0.046)
-            cb.set_label(self.cspec.axis_label, fontsize=pt - 1,
+            cb.set_label(self.cspec.plot_label, fontsize=pt - 1,
                          color=t["ink_2"])
             cb.ax.tick_params(labelsize=pt - 2, colors=t["muted"], length=2,
                               width=0.5)

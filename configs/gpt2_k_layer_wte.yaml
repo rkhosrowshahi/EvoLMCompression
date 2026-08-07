@@ -1,0 +1,195 @@
+# GPT-2 + wte, weight sharing only -- layer-wise K (49 variables)
+#
+# One of six configs that add the tied token-embedding matrix to the compressed
+# target set. Three groupings x {weight sharing, weight sharing + pruning}:
+#
+#   gpt2_k_{global,block,layer}_wte.yaml                     K only
+#   gpt2_k_{global,block,layer}_wte_prune_bitmap_2obj.yaml   K + pruning
+#
+# Paired with the ng100 runs of the same name without `_wte`, which differ in
+# exactly one line (model.exclude_patterns) plus n_gen.
+#
+# -- WHAT CHANGED AND WHY IT IS ONE LINE --------------------------------------
+#
+# `model.exclude_patterns` drops "lm_head". That single string is the whole
+# change, and the reason is worth stating because the obvious edit does nothing.
+#
+# discover_targets() filters on MODULE TYPE before it ever looks at the pattern
+# list (models.py:104, `isinstance(mod, linear_types)`). transformer.wte is an
+# nn.Embedding, so it is invisible to the search no matter what the exclusion
+# list says -- removing "wte" or "embed" from the list is a no-op on GPT-2.
+#
+# But GPT-2 TIES its head to its embedding, so lm_head is an
+# nn.Linear(768, 50257, bias=False) whose .weight IS transformer.wte.weight,
+# the same Parameter object. It passes the type check and is excluded only by
+# the string. Delete the string and the 38.6M-weight embedding enters the target
+# set through the head, and because MasterWeights.write copies in place into the
+# shared tensor, compressing it via lm_head compresses the input embedding
+# lookup at the same time. count_untouched_weights already counts tied weights
+# once (models.py:136), so the accounting stays correct with no code change.
+#
+# "embed", "wte" and "wpe" are kept in the list. They are inert on GPT-2 but
+# they document the intent and they still exclude wpe on any model where the
+# positional table is an nn.Linear.
+#
+# -- WHAT IT DOES TO THE ACCOUNTING -------------------------------------------
+#
+#                       before          after
+#   target layers          48             49
+#   target weights     84,934,656    123,532,032   (+45.4%)
+#   untouched          39,505,152        907,776   (wpe + biases + norms)
+#   untouched share        31.7%          0.73%
+#   CR ceiling             3.15x           137x
+#
+# The old runs had a HARD CEILING of 3.15x. uniform K=2 already reached 2.78x,
+# so 88% of everything the index axis could ever deliver was already spent, and
+# the remaining 0.37x was unreachable by any genome. That ceiling was the fp16
+# embedding, not the method.
+#
+# -- READ cr_deployable, NOT bpw_target ---------------------------------------
+#
+# bpw_target will look almost UNCHANGED against the old runs. At per_tensor the
+# codebook is ~0.06 bpw, so bpw_target is essentially ceil(log2 K) whether or
+# not lm_head is in the target set; only the denominator moved (84.9M ->
+# 123.5M). The whole effect lands on cr_deployable, which is why it is added to
+# report_metrics below. Expected, at uniform bpw:
+#
+#     bpw   CR before   CR after
+#       1     2.78x      14.4x
+#       2     2.48x       7.61x
+#       4     2.05x       3.91x
+#       8     1.52x       1.99x
+#
+# Note this also makes cr_deployable a near-monotone transform of bpw_target
+# (untouched is now only 14.5 Mbits of the total), so the two must NOT be paired
+# as objectives -- objectives.check_redundancy would rightly flag it. The
+# objective pair stays PPL + BPW.
+#
+# -- THE COMPARABILITY COST ---------------------------------------------------
+#
+# bpw_target now covers a 38.6M-weight tensor that no GPTQ/AWQ/SqueezeLLM table
+# quantizes, so it is no longer quotable against that literature. Report it
+# alongside the ng100 runs rather than instead of them, and say plainly that the
+# target set differs. All 13 baseline reference points move too, since the
+# baseline sweep now quantizes lm_head at uniform K as well.
+#
+# -- THIS CONFIG SPECIFICALLY -------------------------------------------------
+#
+# 49 variables, not 48. The scheme is `block_type` (one K per weight matrix);
+# lm_head has block=-1 and proj_type "lm_head", so _group_key gives it the
+# group "b-1.lm_head", appended last.
+#
+# This is the finest encoding of the three and the only one that can give
+# lm_head a K independent of every individual projection rather than of every
+# block. It is also where NSGA-II is most likely to strain: 48 variables was
+# already flagged as the edge in gpt2_k_layer.yaml, and the integer encoding
+# widens each one from 13 options to 8191. n_gen 1000 is 10x the budget those
+# runs had, which is the main reason this encoding is worth retrying here.
+#
+# If this front still does not beat the block-wise one, re-run with
+# algorithm: unsga3 before concluding that finer granularity does not help --
+# "granularity is useless" and "the optimizer ran out of resolution" are
+# different hypotheses and the paper has to separate them.
+#
+# One caution on search dynamics. lm_head is 38.6M of 123.5M target weights, so
+# a single gene now governs 31% of bpw_target while the other 48 split 69% at
+# 1.4% each -- roughly 22x the leverage of any projection gene. init: linspace
+# does not sweep it independently (encode_uniform sets every group to the same
+# K), so its exploration comes entirely from SBX/PM. mutation_prob_var is pinned
+# at 1.0 below rather than left null, which matters more here than anywhere:
+# the pymoo default of min(0.5, 1/n_var) would touch this gene on 2% of
+# mutations.
+
+model:
+  name: gpt2
+  dtype: float16
+  device: cuda
+  master_device: cuda
+  # <-- THE LINE THAT ADDS wte. "lm_head" removed; see the header for why the
+  # other three entries are inert on GPT-2 but kept anyway.
+  exclude_patterns: [embed, wte, wpe]
+
+quant:
+  granularity: per_tensor    # ONE codebook per layer, incl. lm_head's 38.6M
+  binning: uniform
+  k_encoding: integer
+  k_min: 2
+  k_max: 8192
+  k_choices: [2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192]
+  codebook_bits: 16
+  # Unchanged at 32. The (layer, K) cache only pays when K repeats, and integer
+  # K makes almost every candidate a fresh K. Worth knowing: the first candidate
+  # fills all 32 slots walking the layers in order, and lm_head is discovered
+  # LAST, so it is never cached -- which is what keeps a 154 MB fp32
+  # reconstruction out of the cache rather than something to fix.
+  cache_entries: 32
+
+prune:
+  enabled: false             # this sweep isolates K
+
+variables:
+  k_grouping: block_type         # <-- THE ONLY LINE THAT DIFFERS across the sweep
+  prune_grouping: global     # unused while prune.enabled is false
+
+data:
+  calib_dataset: c4
+  eval_dataset: wikitext2
+  seqlen: 1024
+  n_proxy_seq: 8
+  n_eval_seq: 64
+
+search:
+  algorithm: nsga2
+  pop_size: 100
+  n_gen: 1000
+  seed: 0
+  objectives: [ppl_proxy, bpw_target]
+  # cr_deployable is where this change is visible; bpw_target barely moves.
+  # Reported per generation, never optimized (see the redundancy note above).
+  report_metrics: [cr_deployable]
+  init: linspace
+  warm_start: true
+  baseline_sweep: true       # 13 fixed-K reference points, now incl. lm_head
+  size_objective: bpw_target
+
+  crossover_prob: 0.9
+  crossover_prob_var: 1.0
+  crossover_eta: 15
+  mutation_prob: 1.0         # 0.9 in the global config
+  mutation_prob_var: 1.0     # per gene; null would give min(0.5, 1/49) = 2.0%
+  mutation_eta: 20
+  eliminate_duplicates: true
+  n_offsprings: null
+  ref_dir_partitions: null
+  moead_neighbors: 15
+  moead_prob_neighbor_mating: 0.7
+
+log:
+  root: logs
+  run_name: gpt2-k-layer-wte-np100-ng1000
+  checkpoint_every: 10
+  save_history: true
+
+plot:
+  enabled: true
+  # 10, not 1. At n_gen 1000 a per-generation frame would write 2,000 files and
+  # a 167-second video; every 10 gives the same 100 frames the ng100 runs
+  # produced, so the videos stay comparable and the I/O stays sane.
+  every: 10
+  formats: [png, pdf]
+  dpi: 150
+  style: paper
+  yscale: log
+  ylim_min: 1.0
+  ylim_min_ratio: 0.8
+  ylim_pad: 0.03
+  ylim_max: null
+  ylim_max_ratio: null
+  legend_alpha: 0.3
+  marker_pt: 3.5
+  baseline_label: exponential search (baseline)
+  annotation_pt: null
+  venue: ieee
+  width: column
+  video: [mp4, gif]
+  video_fps: 6

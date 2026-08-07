@@ -596,12 +596,18 @@ def save_front(res, problem, cfg, run):
                          for n, s in settings.items()},
             "estimated": cost.summary(),
         })
+        # The cost columns come from `cost_only`, which prices a genome without
+        # touching the weights: it assumes a flat symbol histogram and, more
+        # importantly, NO PRUNING -- its stub reports sparsity 0.0 whatever the
+        # genome says. So they are estimates and are prefixed to say so. The
+        # real numbers come from run_eval.py into results.csv, which re-applies
+        # each genome and measures. Anything about sparsity must be read there.
         rows.append({"rank": rank,
                      **{f"f{j + 1}_{n}": round(float(F[i, j]), 5)
                         for j, n in enumerate(objset.names)},
                      "ppl_proxy": round(float(F[i, 0]), 4),
                      "bpw_objective": round(float(F[i, 1]), 4),
-                     **{k: round(v, 5) for k, v in cost.summary().items()}})
+                     **{f"est_{k}": round(v, 5) for k, v in cost.summary().items()}})
 
     with open(run.file("data", "front.json"), "w") as f:
         json.dump({"config": cfg.to_dict(), "front": front}, f, indent=2)
