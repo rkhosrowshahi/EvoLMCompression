@@ -269,9 +269,8 @@ def _style(ax, t, pt, legend_alpha=0.3):
     ax.grid(True, which="major", color=t["grid"], lw=0.8, zorder=0)
     ax.grid(True, which="minor", color=t["grid"], lw=0.4, alpha=0.6, zorder=0)
     ax.set_axisbelow(True)
-    for s in ("top", "right"):
-        ax.spines[s].set_visible(False)
-    for s in ("left", "bottom"):
+    for s in ("top", "right", "left", "bottom"):
+        ax.spines[s].set_visible(True)
         ax.spines[s].set_color(t["axis"])
         ax.spines[s].set_linewidth(1.0)
     ax.tick_params(which="major", colors=t["muted"], labelsize=pt - 1,

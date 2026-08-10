@@ -92,14 +92,32 @@ def _proj_type(name: str) -> str:
     return parts[-1]
 
 
-def discover_targets(model: nn.Module, exclude_patterns) -> list[TargetLayer]:
-    """Find every 2-D projection weight eligible for compression.
+def discover_targets(model: nn.Module, exclude_patterns,
+                     include_embeddings: bool = False) -> list[TargetLayer]:
+    """Find every 2-D weight matrix eligible for compression.
 
-    Embeddings, the LM head and all norms/biases are excluded -- they stay in
-    fp16 and are accounted for separately (see codec.ModelCost.untouched_bits).
+    THE TYPE FILTER RUNS FIRST, and that is the thing to know before writing an
+    exclude list. Only the module types below are ever candidates, so norms and
+    biases can never enter the target set no matter what the patterns say --
+    they are 1-D parameters on LayerNorm modules. Removing "wte" from the
+    exclude list is likewise a no-op unless `include_embeddings` is set.
+
+    `include_embeddings` adds nn.Embedding. On GPT-2 that is the difference
+    between "everything reachable through a Linear" and "everything": the
+    positional table `wpe` is an Embedding and is reachable no other way, while
+    the token table `wte` is reachable through the tied `lm_head` Linear.
+
+    TIED WEIGHTS ARE CLAIMED ONCE. GPT-2's lm_head.weight IS transformer.wte
+    .weight, the same Parameter. With embeddings included, both modules pass the
+    type filter, and returning both would give MasterWeights two entries for one
+    tensor -- the second write would silently overwrite the first and the bit
+    accounting would double-count. First module wins; the rest are skipped.
     """
     targets: list[TargetLayer] = []
     linear_types = (nn.Linear,) + ((Conv1D,) if Conv1D else ())
+    if include_embeddings:
+        linear_types = linear_types + (nn.Embedding,)
+    seen_weights: set[int] = set()
 
     for name, mod in model.named_modules():
         if not isinstance(mod, linear_types):
@@ -109,6 +127,10 @@ def discover_targets(model: nn.Module, exclude_patterns) -> list[TargetLayer]:
         w = mod.weight
         if w.ndim != 2:
             continue
+        if id(w) in seen_weights:
+            continue
+        seen_weights.add(id(w))
+        # Conv1D stores [in, out]; Linear and Embedding both store [out, in].
         transposed = bool(Conv1D) and isinstance(mod, Conv1D)
         out_f, in_f = (w.shape[1], w.shape[0]) if transposed else (w.shape[0], w.shape[1])
         m = _BLOCK_RE.search(name)

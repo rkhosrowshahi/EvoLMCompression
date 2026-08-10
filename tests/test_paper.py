@@ -839,7 +839,7 @@ def _hv_log(objectives=("ppl_proxy", "bpw_target"), **plot):
     if len(objset) == 2:
         hv = hv_indicator((1.0, 13.0), (22.0, 1e8), cfg.plot.yscale)
     else:
-        # (ideal, nadir) per objective; cr_archival is maximized, so its ideal
+        # (ideal, nadir) per objective; cr_archive is maximized, so its ideal
         # is the larger number.
         hv = hv_indicator_nd([(22.0, 1e8), (1.0, 13.0), (3.2, 1.1)],
                              [s.log for s in objset], objset.names)
@@ -874,8 +874,8 @@ def test_hv_reference_names_the_origin_that_actually_applied():
 def test_hv_reference_reports_every_objective_and_its_direction():
     """A third objective the log never mentions is a third objective nobody
     can check. Each line must also say which way the objective runs."""
-    out = _hv_log(objectives=("ppl_proxy", "bpw_target", "cr_archival"))
-    assert "objective 3  cr_archival" in out
+    out = _hv_log(objectives=("ppl_proxy", "bpw_target", "cr_archive"))
+    assert "objective 3  cr_archive" in out
     assert "MAX" in out                    # cr_* is maximized
     assert out.count("min") >= 2           # ppl and bpw are not
     # The normalized corners must have one coordinate per objective.
@@ -888,7 +888,7 @@ def test_hv_reference_reports_every_objective_and_its_direction():
 def test_cr_objectives_are_maximized_and_round_trip():
     from evolmc.objectives import ObjectiveSet
 
-    o = ObjectiveSet(("ppl_proxy", "bpw_target", "cr_archival"))
+    o = ObjectiveSet(("ppl_proxy", "bpw_target", "cr_archive"))
     assert o.n_obj == 3
     values = [42.0, 4.0, 2.5]
     F = o.to_min(values)
@@ -914,35 +914,40 @@ def test_objective_set_rejects_typos_and_duplicates():
 def test_redundant_objective_pairs_are_flagged():
     """The trap this whole mechanism exists to catch.
 
-    cr_deployable is exactly 16/bpw_model -- both normalize the same
+    cr_deploy is exactly 16/bpw_model -- both normalize the same
     target_bits_deployable -- so pairing them leaves dominance untouched and
     burns a full search budget reproducing the 2-objective front.
     """
     from evolmc.objectives import ObjectiveSet, check_redundancy
 
     bad = check_redundancy(ObjectiveSet(
-        ("ppl_proxy", "bpw_model", "cr_deployable")))
+        ("ppl_proxy", "bpw_model", "cr_deploy")))
     assert len(bad) == 1 and "deployable bit total" in bad[0]
 
-    # bpw_target is deployable too, so it is equally redundant with cr_deployable.
+    # bpw_target is deployable too, so it is equally redundant with cr_deploy.
     assert check_redundancy(ObjectiveSet(
-        ("ppl_proxy", "bpw_target", "cr_deployable")))
+        ("ppl_proxy", "bpw_target", "cr_deploy")))
 
     # Deployable against archival is the pairing that actually works.
     assert check_redundancy(ObjectiveSet(
-        ("ppl_proxy", "bpw_target", "cr_archival"))) == []
+        ("ppl_proxy", "bpw_target", "cr_archive"))) == []
     assert check_redundancy(ObjectiveSet(("ppl_proxy", "bpw_target"))) == []
 
 
 def test_objective_labels_name_their_scope():
-    """bpw_target covers the projections, cr_archival the whole checkpoint, so
+    """bpw_target covers the projections, cr_archive the whole checkpoint, so
     16/f2 does not equal f3. An axis that hides that invites the arithmetic."""
     from evolmc.objectives import ObjectiveSet
 
-    o = ObjectiveSet(("ppl_proxy", "bpw_target", "cr_archival"))
+    o = ObjectiveSet(("ppl_proxy", "bpw_target", "cr_archive"))
     assert o[1].axis_label == "bits per weight (target)"
-    assert o[2].axis_label == "ACR (whole)"
+    assert o[2].axis_label == "CR, Huffman (whole)"
     assert o[0].axis_label == "proxy perplexity"   # no scope to name
+
+    # The two ratios differ only by entropy coding, so the labels have to say
+    # which is which. "CR" on both axes with nothing else would be unreadable.
+    d = ObjectiveSet(("ppl_proxy", "cr_deploy"))
+    assert d[1].axis_label == "CR, no Huffman (whole)"
 
 
 def test_plot_labels_mark_the_direction_of_improvement():
@@ -954,7 +959,7 @@ def test_plot_labels_mark_the_direction_of_improvement():
     """
     from evolmc.objectives import ObjectiveSet
 
-    o = ObjectiveSet(("ppl_proxy", "bpw_target", "cr_archival"))
+    o = ObjectiveSet(("ppl_proxy", "bpw_target", "cr_archive"))
     assert o[0].arrow == r"$\downarrow$"      # perplexity: minimized
     assert o[1].arrow == r"$\downarrow$"      # bits per weight: minimized
     assert o[2].arrow == r"$\uparrow$"        # compression ratio: maximized
@@ -1034,7 +1039,7 @@ def test_reference_direction_algorithms_build_at_three_objectives(name):
     cfg = Config()
     cfg.search.algorithm = name
     cfg.search.pop_size = 100
-    cfg.search.objectives = ("ppl_proxy", "bpw_target", "cr_archival")
+    cfg.search.objectives = ("ppl_proxy", "bpw_target", "cr_archive")
     algo = build_algorithm(cfg, g, np.zeros((100, g.n_var)))
     assert algo.ref_dirs.shape[1] == 3
     assert 100 <= len(algo.ref_dirs) <= 200
@@ -1062,7 +1067,7 @@ def _objset_comp():
         def __init__(self, b):
             self.bpw_target = self.bpw_model = b
         def summary(self):
-            return {"bpw_target": self.bpw_target, "cr_archival": 16.0 / self.bpw_target}
+            return {"bpw_target": self.bpw_target, "cr_archive": 16.0 / self.bpw_target}
 
     class FakeGenome:
         k_choices = (2, 8192)
@@ -1081,9 +1086,9 @@ def test_bounds_put_the_ideal_corner_first_for_each_direction():
 
     cfg = Config()
     cfg.plot.ylim_min, cfg.plot.ylim_pad = 1.0, 0.0
-    objset = ObjectiveSet(("ppl_proxy", "bpw_target", "cr_archival"))
-    rows = [{"ppl_proxy": 17884.0, "bpw_target": 1.0, "cr_archival": 2.78},
-            {"ppl_proxy": 27.7, "bpw_target": 13.0, "cr_archival": 1.24}]
+    objset = ObjectiveSet(("ppl_proxy", "bpw_target", "cr_archive"))
+    rows = [{"ppl_proxy": 17884.0, "bpw_target": 1.0, "cr_archive": 2.78},
+            {"ppl_proxy": 27.7, "bpw_target": 13.0, "cr_archive": 1.24}]
     bounds = derive_bounds(_objset_comp(), cfg, objset, rows, fp16_ppl=27.675)
 
     assert bounds[0][0] < bounds[0][1]      # ppl minimized: ideal is lower
@@ -1098,7 +1103,7 @@ def test_refit_reopens_a_maximized_objective_in_its_own_direction():
 
     cfg = Config()
     cfg.plot.ylim_min = 1.0
-    objset = ObjectiveSet(("ppl_proxy", "bpw_target", "cr_archival"))
+    objset = ObjectiveSet(("ppl_proxy", "bpw_target", "cr_archive"))
     bounds = [(1.0, 500.0), (1.0, 13.0), (2.9, 1.2)]
 
     # Nothing outside the box.

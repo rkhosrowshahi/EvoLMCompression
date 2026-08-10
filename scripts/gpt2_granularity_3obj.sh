@@ -3,12 +3,12 @@
 #
 #   f1  ppl_proxy    proxy perplexity                            (min)
 #   f2  bpw_target   deployable bits per weight, target matrices (min)
-#   f3  cr_archival  archival compression ratio, full checkpoint  (MAX)
+#   f3  cr_archive  archival compression ratio, full checkpoint  (MAX)
 #
 # f2 and f3 are drawn from DIFFERENT bit totals -- fixed-width indices versus
 # entropy-coded ones -- which is what makes the third axis carry information.
-# Pairing two measures from the same total (e.g. bpw_model with cr_deployable,
-# where cr_deployable is exactly 16/bpw_model) would reproduce the 2-objective
+# Pairing two measures from the same total (e.g. bpw_model with cr_deploy,
+# where cr_deploy is exactly 16/bpw_model) would reproduce the 2-objective
 # front exactly. The search warns about that at startup if you try it.
 #
 # For each config in turn: run the search, then immediately evaluate that run's
@@ -16,8 +16,8 @@
 # eval straight away means a crash later still leaves you with complete results
 # for everything finished so far.
 #
-#   bash scripts/run_gpt2_k_3obj_experiments.sh
-#   bash scripts/run_gpt2_k_3obj_experiments.sh --n-gen 5 --pop 20   # quick trial
+#   bash scripts/gpt2_granularity_3obj.sh
+#   bash scripts/gpt2_granularity_3obj.sh --n-gen 5 --pop 20   # quick trial
 #
 # Extra arguments are forwarded to run_search.py.
 #
@@ -34,8 +34,8 @@ cd "$(dirname "$0")/.."
 # its unpruned pair in exactly ONE effective setting, prune.enabled, so the
 # pair isolates what sparsity buys.
 #
-#   bash scripts/run_gpt2_k_3obj_experiments.sh --only noprune
-#   bash scripts/run_gpt2_k_3obj_experiments.sh --only prune
+#   bash scripts/gpt2_granularity_3obj.sh --only noprune
+#   bash scripts/gpt2_granularity_3obj.sh --only prune
 #
 # Anything else is forwarded to run_search.py.
 NOPRUNE=(
@@ -80,7 +80,7 @@ DIR_FILE=$(mktemp)
 trap 'rm -f "$DIR_FILE"' EXIT
 
 echo "=============================================================="
-echo " GPT-2 K sweep, 3 objectives: ppl / bpw_target / cr_archival"
+echo " GPT-2 K sweep, 3 objectives: ppl / bpw_target / cr_archive"
 echo " ${#CONFIGS[@]} experiments (--only $ONLY), K in [2, 8192]"
 echo " started $(date)"
 echo "=============================================================="
@@ -131,5 +131,5 @@ echo "     --labels 'global (1 var),block-wise (12 var),layer-wise (48 var)' \\"
 echo "     --name granularity-3obj-$STAMP --bpw 2,3,4,6,8"
 echo
 echo " the 2-objective vs 3-objective question is answered per grouping, by"
-echo " checking whether the 3-objective front spreads in cr_archival at"
+echo " checking whether the 3-objective front spreads in cr_archive at"
 echo " matched bpw_target -- not by comparing hypervolumes across the two."

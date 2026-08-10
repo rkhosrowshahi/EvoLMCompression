@@ -28,6 +28,20 @@ _RENAMED = {
     "ylim_upper_ratio": "ylim_max_ratio",
 }
 
+# Fields where null means "derive this for me" rather than "off". `auto` is
+# accepted as a more readable spelling and normalized to None on load, so a
+# config can say what it means:
+#
+#     mutation_prob_var: auto     # -> min(0.5, 1/n_var)
+#     csr_span_bits: auto         # -> cheapest gap width per layer
+#
+# Deliberately NOT a blanket rule: `quant.deployable_format` takes the literal
+# string "auto" as a real value, and normalizing that to None would silently
+# turn per-layer format selection into a crash.
+_AUTO_AS_NONE = frozenset({
+    "mutation_prob_var", "csr_span_bits", "n_offsprings", "ref_dir_partitions",
+})
+
 # `xlim: [lo, hi]` / `ylim: [lo, hi]` used to carry both bounds in one pair.
 # They now split across two scalars, so a stored config still loads.
 _SPLIT = {"xlim": ("xlim_min", "xlim_max"), "ylim": ("ylim_min", "ylim_max")}
@@ -48,7 +62,16 @@ class ModelConfig:
     trust_remote_code: bool = False
     # Layers matching any of these substrings are never quantized. They stay
     # fp16 and are still *counted* in the compression accounting.
+    #
+    # NOTE the module TYPE filter in discover_targets runs before these
+    # patterns, so norms and biases are excluded structurally and no pattern is
+    # needed for them -- and no pattern can bring them back.
     exclude_patterns: tuple[str, ...] = ("lm_head", "embed", "wte", "wpe")
+    # Let nn.Embedding into the target set. Off by default, which is what every
+    # finished run assumed. On GPT-2 this is the only way to reach the
+    # positional table `wpe`; the token table `wte` is otherwise reachable
+    # through the tied `lm_head` Linear. Tied weights are claimed once.
+    include_embeddings: bool = False
 
 
 @dataclass
@@ -175,7 +198,7 @@ class SearchConfig:
     #
     # The default reproduces the original two-objective problem exactly.
     # Beware pairing two size measures built from the same bit total, e.g.
-    # bpw_model with cr_deployable: those are monotone transforms of one
+    # bpw_model with cr_deploy: those are monotone transforms of one
     # another and add nothing. See objectives.check_redundancy.
     objectives: tuple[str, ...] = ("ppl_proxy", "bpw_target")
     # Extra ModelCost.summary() keys to carry through the search and report per
@@ -219,6 +242,126 @@ class SearchConfig:
     # MOEA/D only
     moead_neighbors: int = 15
     moead_prob_neighbor_mating: float = 0.7
+
+
+@dataclass
+class BenchmarkConfig:
+    """Protocol for the EVALUATION-phase latency and peak-memory measurement.
+
+    Never touched by the search. Numbers taken under different protocols are not
+    comparable, so every field here is written into the run's metadata and the
+    results CSV carries the protocol in its header comment.
+
+    Read evolmc/benchmark.py before quoting anything this produces. Compression
+    in this project is simulated -- every candidate runs the identical dense
+    fp16 model -- so the MEASURED columns are constant across a front by
+    construction, and the per-candidate numbers worth reporting are the
+    `*_projected` ones.
+    """
+
+    enabled: bool = True
+    # THE PROTOCOL, matching SqueezeLLM's benchmark() in llama.py so the numbers
+    # are quotable beside their table. Tokens are decoded ONE AT A TIME carrying
+    # past_key_values, and the reported latency is the MEDIAN PER-TOKEN time --
+    # what they print as "Median:". Not a whole-generation wall clock.
+    #
+    # Their `--benchmark N`: how many single-token decode steps to time. The KV
+    # cache grows across them, so this also sets how long the context gets.
+    gen_tokens: int = 128
+    batch_size: int = 1
+    # No warm-up field, deliberately. SqueezeLLM's loop has none, and taking the
+    # MEDIAN over gen_tokens steps is what makes that sound: the first few steps
+    # pay for CUDA context setup and autotuning, and a median discards them.
+    # p10 and p90 over the same steps give the noise band that summarize_spread
+    # checks a front's spread against.
+    # Benchmark every Nth row rather than all of them. 1 measures everything,
+    # which is the honest default and the only setting that can demonstrate the
+    # measured columns really are constant. Raise it when a front is large and
+    # the point has already been made.
+    every: int = 1
+
+
+
+@dataclass
+class LatencyConfig:
+    """Coefficients for the `latency_proxy` objective. See evolmc/latency.py.
+
+        T = sum_l [ max(B_l/beta_k, F_l/phi_k) + n_k*tau_k ] + T_fixed
+
+    beta, phi and tau are MEASURED once on the target GPU and frozen to
+    `coeffs_path`. Everything else here is a STATED constant that the fit cannot
+    supply, because the kernels it describes do not exist in this project.
+    Quote these values with any latency number.
+    """
+
+    # Where the fitted coefficients live. Reused across every run of a sweep so
+    # the latency axis is comparable between cells; refitting per run would
+    # compare numbers taken on a differently loaded GPU. Delete the file to
+    # force a refit.
+    coeffs_path: str = "logs/latency_coeffs.json"
+    reuse_coeffs: bool = True
+
+    # -- stated efficiency factors, relative to the measured fp16 stream ----
+    # A packed-LUT dequant kernel reads contiguous indices but gathers centroids,
+    # so it lands below the fp16 streaming rate. 0.85 is a working figure, not a
+    # measurement.
+    lut_bandwidth_eff: float = 0.85
+    # Sparse formats decode irregularly and occupy the GPU poorly. This is where
+    # a bitmap or CSR candidate pays for the bytes it saved, and it is why a
+    # sparse configuration can be SLOWER than a denser one at equal bit width.
+    sparse_bandwidth_eff: float = 0.50
+    # Per-family overrides. bitmap decodes a contiguous mask plus a popcount
+    # gather; CSR walks a gap-coded index stream, which is more serial and less
+    # predictable, so it plausibly streams slower still. null means "use
+    # sparse_bandwidth_eff", which keeps a run from silently asserting a
+    # difference nobody measured.
+    bitmap_bandwidth_eff: float | None = None
+    csr_bandwidth_eff: float | None = None
+    # Fraction of peak fp16 throughput a dequant GEMV achieves. Batch-1 GEMV is
+    # nowhere near compute bound in fp16, but the compute roof is what stops the
+    # proxy promising unbounded speedup as bit width falls, so it must be set.
+    compute_eff: float = 0.25
+    # Arithmetic the fp16 path does not do at all: unpack the index, look up the
+    # centroid. Charged on top of the 2 FLOPs of the multiply-add.
+    dequant_ops_per_weight: float = 1.0
+    # Kernel launches per layer. A sparse path typically needs a second pass for
+    # the sparse component, which is a real per-layer cost at GPT-2's size.
+    kernels_dense: int = 1
+    kernels_sparse: int = 2
+    kernels_csr: int | None = None   # null -> kernels_sparse
+    # Per-kernel launch overhead in microseconds. null measures it directly on
+    # the GPU, which INCLUDES PyTorch's Python-side dispatch and therefore
+    # overestimates what a fused deployed kernel pays. This matters more than it
+    # looks: at GPT-2's size (48 small layers) launches are roughly half the
+    # predicted latency, so set this to a figure from the kernel you intend to
+    # ship if you have one. 5.0 is a reasonable fused-kernel value.
+    launch_us: float | None = None
+
+    # -- the fixed term ----------------------------------------------------
+    act_bytes: int = 2          # fp16 activations
+    # Context length assumed for KV-cache traffic. Match it to
+    # benchmark.gen_tokens so the proxy and the measurement describe the same
+    # operating point.
+    kv_seq_len: int = 128
+    # T_other: everything the per-layer model does not decompose -- LayerNorms,
+    # GELU, attention softmax and its two matmuls, residual adds, reshapes, and
+    # the kernel launches for all of them. Identical across candidates by
+    # definition, and NOT small: the proxy charges launches for 48 target layers
+    # while a real GPT-2 decode step launches 300+ kernels.
+    #
+    # Leaving this at 0 made the proxy underestimate real fp16 decode by 79%
+    # (1.65 vs 7.78 ms/token measured on an RTX 3060), which would inflate every
+    # speedup claim by ~4.7x.
+    extra_fixed_ms: float = 0.0
+    # Measure T_other once instead of guessing it: time real fp16 decode under
+    # benchmark's protocol, subtract everything the model DOES account for, and
+    # take the remainder. This is not back-solving beta -- beta and tau are still
+    # fitted independently, and the residual is a genuinely candidate-independent
+    # quantity. It anchors the proxy so predict_fp16() reproduces the measurement
+    # and every candidate differs from it only through the weight term.
+    #
+    # Set false to keep a pure bottom-up model with extra_fixed_ms as stated.
+    anchor_to_measurement: bool = True
 
 
 @dataclass
@@ -315,6 +458,8 @@ class Config:
     variables: VariableConfig = field(default_factory=VariableConfig)
     data: DataConfig = field(default_factory=DataConfig)
     search: SearchConfig = field(default_factory=SearchConfig)
+    benchmark: BenchmarkConfig = field(default_factory=BenchmarkConfig)
+    latency: LatencyConfig = field(default_factory=LatencyConfig)
     log: LogConfig = field(default_factory=LogConfig)
     plot: PlotConfig = field(default_factory=PlotConfig)
 
@@ -352,6 +497,12 @@ class Config:
                     key = new
                 if key not in fields:
                     raise KeyError(f"unknown option {cls.__name__}.{key}")
+                if (key in _AUTO_AS_NONE and isinstance(val, str)
+                        and val.strip().lower() == "auto"):
+                    # Stored back as null by to_dict, so a run's recorded
+                    # config.yaml says null where the source said auto. Both
+                    # load identically; the resolved value is logged at startup.
+                    val = None
                 if isinstance(val, list):
                     val = tuple(val)
                 kwargs[key] = val
@@ -364,6 +515,8 @@ class Config:
             variables=build(VariableConfig, raw.get("variables")),
             data=build(DataConfig, raw.get("data")),
             search=build(SearchConfig, raw.get("search")),
+            benchmark=build(BenchmarkConfig, raw.get("benchmark")),
+            latency=build(LatencyConfig, raw.get("latency")),
             log=build(LogConfig, raw.get("log")),
             plot=build(PlotConfig, raw.get("plot")),
         )

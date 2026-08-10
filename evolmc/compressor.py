@@ -40,7 +40,9 @@ class Compressor:
         self.tokenizer = tokenizer
         self.device = next(model.parameters()).device
 
-        self.targets = discover_targets(model, cfg.model.exclude_patterns)
+        self.targets = discover_targets(
+            model, cfg.model.exclude_patterns,
+            include_embeddings=getattr(cfg.model, 'include_embeddings', False))
         self.n_untouched = count_untouched_weights(model, self.targets)
         self.master = MasterWeights(self.targets, cfg.model.master_device)
         self.genome = Genome(self.targets, cfg.quant, cfg.prune, cfg.variables)

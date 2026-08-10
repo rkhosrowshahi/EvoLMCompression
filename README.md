@@ -52,7 +52,7 @@ logs, checkpoints, Pareto figures and a video of the front converging.
 layer-wise `K` — differing in exactly one line so the fronts are comparable.
 
 ```bash
-bash scripts/run_gpt2_k_experiments.sh
+bash scripts/gpt2_granularity.sh
 ```
 
 ## Notes

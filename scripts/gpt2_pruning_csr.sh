@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # GPT-2, weight sharing + PRUNING under CSR costing.
 #
-# Companion to run_gpt2_prune_bitmap.sh. Same six runs, same pruning, same
+# Companion to gpt2_pruning_bitmap.sh. Same six runs, same pruning, same
 # objectives -- the ONLY difference is how a survivor's position is recorded:
 #
 #   bitmap  1 bit per ORIGINAL position, alive or dead
@@ -10,9 +10,9 @@
 # So the two scripts together answer one question: which representation
 # reaches a smaller model at equal quality?
 #
-#   bash scripts/run_gpt2_prune_csr.sh
-#   bash scripts/run_gpt2_prune_csr.sh --only 2obj
-#   bash scripts/run_gpt2_prune_csr.sh --n-gen 5 --pop 20     # quick trial
+#   bash scripts/gpt2_pruning_csr.sh
+#   bash scripts/gpt2_pruning_csr.sh --only 2obj
+#   bash scripts/gpt2_pruning_csr.sh --n-gen 5 --pop 20     # quick trial
 #
 # WHAT TO EXPECT, so the result is interpretable either way.
 #

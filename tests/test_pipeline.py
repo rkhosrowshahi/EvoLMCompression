@@ -149,7 +149,7 @@ def test_dense_format_gives_pruning_no_credit_at_all():
     Under `dense` every weight POSITION carries a full index, so a pruned
     weight costs exactly what a live one does. Measured on the finished pruned
     runs, candidates at the same bpw spanned 0.00 to 0.95 sparsity with
-    cr_deployable identical to 6 decimals. That is correct for a dense LUT
+    cr_deploy identical to 6 decimals. That is correct for a dense LUT
     kernel and wrong as a statement about parameter count.
     """
     torch.manual_seed(0)
@@ -386,7 +386,7 @@ def test_param_reduction_is_reported_separately_from_size():
     # so the whole-model parameter reduction is far below the layer sparsity.
     assert 0.55 < mc.param_reduction < 0.68
     # The two are genuinely different numbers, not one restated.
-    assert abs(mc.cr_deployable - 1.0 / (1.0 - mc.param_reduction)) > 0.02
+    assert abs(mc.cr_deploy - 1.0 / (1.0 - mc.param_reduction)) > 0.02
     assert mc.n_alive_total < mc.n_total_weights
 
 
@@ -419,7 +419,7 @@ def test_pruning_moves_the_archival_objective_and_not_the_deployable_one():
 
     The reserved zero codeword keeps the index width at ceil(log2 K) and
     k_centroids at K no matter how much is pruned, so t_lo/t_hi are invisible
-    to bpw_target and fully visible to cr_archival. Two genes that move one
+    to bpw_target and fully visible to cr_archive. Two genes that move one
     size objective and not the other are what make the front genuinely 3-D --
     if this ever fails, those configs are searching a 2-D problem.
     """
@@ -430,7 +430,7 @@ def test_pruning_moves_the_archival_objective_and_not_the_deployable_one():
     w = torch.randn(64, 4096)
     scale = w.std(1, keepdim=True)
     cfg = _cfgs()
-    objset = ObjectiveSet(("ppl_proxy", "bpw_target", "cr_archival"))
+    objset = ObjectiveSet(("ppl_proxy", "bpw_target", "cr_archive"))
 
     deployable, archival, sparsity = [], [], []
     for t in (0.0, 0.25, 0.5, 1.0, 1.5):
@@ -547,11 +547,11 @@ def test_model_cost_counts_untouched_weights():
     # bpw_target on a model with large embeddings are hiding this gap.
     assert mc.bpw_target == pytest.approx(4.0625)
     assert mc.bpw_model == pytest.approx((4.0625 + 16) / 2)
-    assert mc.cr_deployable == pytest.approx(32 / (4.0625 + 16))
-    assert mc.cr_deployable < 1.6
+    assert mc.cr_deploy == pytest.approx(32 / (4.0625 + 16))
+    assert mc.cr_deploy < 1.6
     # Flat histogram: entropy coding cannot help, so archival must not look
     # better than deployable.
-    assert mc.cr_archival <= mc.cr_deployable + 1e-6
+    assert mc.cr_archive <= mc.cr_deploy + 1e-6
 
 
 # -- genome ----------------------------------------------------------------

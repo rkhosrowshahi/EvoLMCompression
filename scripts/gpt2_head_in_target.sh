@@ -6,10 +6,10 @@
 # global runs 100 generations (1 or 3 variables, saturated long before that),
 # block and layer run 1000 (13/15 and 49/51 variables).
 #
-#   bash scripts/run_gpt2_wte.sh
-#   bash scripts/run_gpt2_wte.sh --only share
-#   bash scripts/run_gpt2_wte.sh --only prune
-#   bash scripts/run_gpt2_wte.sh --n-gen 5 --pop 20        # quick trial
+#   bash scripts/gpt2_head_in_target.sh
+#   bash scripts/gpt2_head_in_target.sh --only share
+#   bash scripts/gpt2_head_in_target.sh --only prune
+#   bash scripts/gpt2_head_in_target.sh --n-gen 5 --pop 20        # quick trial
 #
 # Anything after --only is forwarded to run_search.py.
 #
@@ -17,7 +17,7 @@
 #
 # Every previous GPT-2 run left 39.5M weights (31.7% of the checkpoint) at fp16
 # because model.exclude_patterns excluded the LM head. That put a HARD CEILING
-# of 3.15x on cr_deployable which no genome could reach past. uniform K=2
+# of 3.15x on cr_deploy which no genome could reach past. uniform K=2
 # already scored 2.78x, so 88% of everything the index axis could ever deliver
 # had already been spent and the remaining 0.37x was unreachable.
 #
@@ -40,7 +40,7 @@
 #
 # bpw_target will look almost unchanged against the ng100 runs. At per_tensor
 # the codebook is ~0.06 bpw, so bpw_target is essentially ceil(log2 K) either
-# way; only the denominator moved. The whole effect lands on cr_deployable,
+# way; only the denominator moved. The whole effect lands on cr_deploy,
 # which is why every config carries it in report_metrics. Expected:
 #
 #     bpw   CR before   CR after
@@ -176,13 +176,13 @@ for name, (n_var, n_gen) in EXPECT.items():
         bad.append(f"{name}: plot.every {cfg.plot.every} at n_gen "
                    f"{cfg.search.n_gen} gives {frames} frames, expected ~100")
     budget.append((name, cfg.search.pop_size, cfg.search.n_gen))
-    if "cr_deployable" not in cfg.search.report_metrics:
-        bad.append(f"{name}: cr_deployable missing from report_metrics")
-    # cr_deployable must stay a REPORTED metric. With untouched down to 14.5
+    if "cr_deploy" not in cfg.search.report_metrics:
+        bad.append(f"{name}: cr_deploy missing from report_metrics")
+    # cr_deploy must stay a REPORTED metric. With untouched down to 14.5
     # Mbits it is a near-monotone transform of bpw_target, so as an objective it
     # would buy a third axis that cannot disagree with the second.
-    if "cr_deployable" in cfg.search.objectives:
-        bad.append(f"{name}: cr_deployable is an OBJECTIVE; it is redundant "
+    if "cr_deploy" in cfg.search.objectives:
+        bad.append(f"{name}: cr_deploy is an OBJECTIVE; it is redundant "
                    f"against bpw_target once wte is a target")
     if cfg.prune.enabled and cfg.quant.deployable_format != "bitmap":
         bad.append(f"{name}: pruning on but deployable_format is "
@@ -258,6 +258,6 @@ echo "   python3 scripts/compare_runs.py \\"
 for d in "${RUN_DIRS[@]}"; do echo "     $(basename "$d") \\"; done
 echo "     --labels 'global,block,layer' --name wte-$STAMP --bpw 2,3,4,6,8"
 echo
-echo "   # Against the ng100 runs, compare on cr_deployable, NOT bpw_target:"
+echo "   # Against the ng100 runs, compare on cr_deploy, NOT bpw_target:"
 echo "   # the target denominator moved from 84.9M to 123.5M weights, so the"
 echo "   # two sweeps' bpw figures are not the same quantity."

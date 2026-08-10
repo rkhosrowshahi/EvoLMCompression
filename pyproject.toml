@@ -23,3 +23,7 @@ include = ["evolmc*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    # Downloads a small model and runs real generations. Deselect with -m "not slow".
+    "slow: needs a model download or real forward passes",
+]

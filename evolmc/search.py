@@ -111,7 +111,7 @@ def baseline_sweep(problem, run):
     run.log(f"  fp16                     ppl {fp16:10.3f}")
 
     rows = [{"tag": "fp16", "K": 0, "ppl_proxy": fp16, "bpw_target": 16.0,
-             "bpw_model": 16.0, "cr_deployable": 1.0}]
+             "bpw_model": 16.0, "cr_deploy": 1.0}]
     points, measured = [], []
     for k in comp.genome.k_choices:
         cand = comp.apply(comp.genome.encode_uniform(k))
@@ -119,6 +119,12 @@ def baseline_sweep(problem, run):
         s = cand.cost.summary()
         bpw = (s["bpw_target"] if problem.cfg.search.size_objective == "bpw_target"
                else s["bpw_model"])
+        # The reference sweep is where the frozen objective box comes from, so
+        # every objective must appear in it -- including a predicted one.
+        # Without this, derive_bounds raises "absent from the reference sweep"
+        # the moment latency_ms is an objective.
+        if getattr(problem, "latency", None) is not None:
+            s = {**s, "latency_proxy": problem.latency.predict(cand.cost)}
         rows.append({"tag": f"uniform-K{k}", "K": k, "ppl_proxy": ppl, **s})
         # Real, measured summaries -- these are what the objective bounds are
         # derived from. cost_only's flat-histogram estimate would put the true
@@ -126,7 +132,7 @@ def baseline_sweep(problem, run):
         measured.append({"ppl_proxy": ppl, **s})
         points.append((bpw, ppl, k))
         run.log(f"  uniform K={k:<4}            ppl {ppl:10.3f}   bpw {bpw:5.2f}"
-                f"   CR {s['cr_deployable']:5.2f}x")
+                f"   CR {s['cr_deploy']:5.2f}x")
     comp.restore()
 
     path = run.file("data", "baselines.csv")
@@ -138,7 +144,7 @@ def baseline_sweep(problem, run):
     return fp16, points, measured
 
 
-def _log_objective_correlations(run, objset, measured):
+def _log_objective_correlations(run, objset, measured, cfg=None):
     """Say up front whether any two objectives can actually disagree.
 
     An objective that is a monotone transform of another costs a full search
@@ -166,10 +172,14 @@ def _log_objective_correlations(run, objset, measured):
     for i in range(len(objset)):
         for j in range(i + 1, len(objset)):
             if abs(rho[i, j]) > 0.9999:
-                run.log(f"  WARNING {objset.names[i]} and {objset.names[j]} are "
-                        f"perfectly rank-correlated here; the front will match "
-                        f"a run without one of them")
-    for msg in check_redundancy(objset):
+                run.log(f"  NOTE {objset.names[i]} and {objset.names[j]} are "
+                        f"perfectly rank-correlated ON THE REFERENCE SWEEP. "
+                        f"That sweep is a one-parameter family (uniform K, no "
+                        f"pruning), so any pair monotone in K ties here whether "
+                        f"or not it is redundant off the curve. Judge "
+                        f"redundancy from the warnings below and from the front "
+                        f"itself, not from this number.")
+    for msg in check_redundancy(objset, cfg):
         run.log(f"  WARNING {msg}")
 
 
@@ -187,7 +197,7 @@ def run_search(problem, cfg, run, resume_from: str | None = None):
                                  if cfg.search.baseline_sweep
                                  else (None, [], []))
     problem.n_baseline_evals = comp.n_evals
-    _log_objective_correlations(run, objset, measured)
+    _log_objective_correlations(run, objset, measured, problem.cfg)
 
     bounds = derive_bounds(comp, cfg, objset, measured, fp16)
     xlim = _axis(bounds[1])
@@ -221,6 +231,16 @@ def run_search(problem, cfg, run, resume_from: str | None = None):
                 f"eta={cfg.search.crossover_eta})  "
                 f"PM(prob={cfg.search.mutation_prob}, "
                 f"prob_var={pv:.4g}, eta={cfg.search.mutation_eta})")
+        # The number that actually matters, spelled out. `prob_var` is a
+        # per-GENE rate, so at a fixed value the disruption grows with n_var --
+        # and n_var is what the grouping axis varies. Reporting expected genes
+        # touched per offspring makes an unintended 50x difference between cells
+        # visible in the log instead of only in the fronts.
+        run.log(f"           expected genes changed per offspring: "
+                f"{cfg.search.mutation_prob * pv * genome.n_var:.2f} of "
+                f"{genome.n_var}"
+                + ("   (1/n_var regime)" if cfg.search.mutation_prob_var is None
+                   else "   <- pinned; see the note in the config"))
         algorithm = build_algorithm(cfg, genome, sampling)
         algorithm.setup(problem, termination=("n_gen", cfg.search.n_gen),
                         seed=cfg.search.seed, verbose=False)

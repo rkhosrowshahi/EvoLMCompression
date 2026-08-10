@@ -13,7 +13,7 @@
 # The earlier pruned runs were priced under `dense`, which charges one index per
 # weight POSITION. A pruned weight cost exactly what a live one did, so the size
 # objective was blind to sparsity: candidates spanning 0.000 to 0.953 sparsity
-# at the same bpw had cr_deployable identical to SIX DECIMALS.
+# at the same bpw had cr_deploy identical to SIX DECIMALS.
 #
 # The consequence was not a bad search, it was a bad question. Perplexity saw
 # the full damage of pruning (at 8 bpw, 58 -> 3723 as sparsity rose), the size
@@ -154,7 +154,7 @@ search:
   n_gen: 100
   seed: 0
 
-  # PPL + BPW. The paired _3obj config appends cr_archival.
+  # PPL + BPW. The paired _3obj config appends cr_archive.
   objectives: [ppl_proxy, bpw_target]
 
   init: linspace

@@ -8,17 +8,17 @@
 #   PPL + BPW        the control
 #   PPL + BPW + ACR  adds the archival axis
 #
-#   bash scripts/run_gpt2_prune_bitmap.sh
-#   bash scripts/run_gpt2_prune_bitmap.sh --only 2obj
-#   bash scripts/run_gpt2_prune_bitmap.sh --only 3obj
-#   bash scripts/run_gpt2_prune_bitmap.sh --n-gen 5 --pop 20     # quick trial
+#   bash scripts/gpt2_pruning_bitmap.sh
+#   bash scripts/gpt2_pruning_bitmap.sh --only 2obj
+#   bash scripts/gpt2_pruning_bitmap.sh --only 3obj
+#   bash scripts/gpt2_pruning_bitmap.sh --n-gen 5 --pop 20     # quick trial
 #
 # Anything after --only is forwarded to run_search.py.
 #
 # WHY THIS SUPERSEDES THE EARLIER PRUNED RUNS. Those were priced under `dense`,
 # which charges one index per weight POSITION, so a pruned weight cost exactly
 # what a live one did. Candidates spanning 0.000 to 0.953 sparsity at the same
-# bpw had cr_deployable identical to six decimals. The search was shown a knob
+# bpw had cr_deploy identical to six decimals. The search was shown a knob
 # that costs quality and returns nothing, and correctly refused to turn it:
 # median front sparsity came out at 0.13 to 0.29. Under bitmap the cost is
 #

@@ -40,6 +40,7 @@ import torch  # noqa: E402
 import yaml  # noqa: E402
 
 from evolmc import Compressor, Config  # noqa: E402
+from evolmc.objectives import canonical, canonicalize_row  # noqa: E402
 from evolmc.rundir import find_run  # noqa: E402
 
 LEAD = ["tag", "ppl_eval", "ppl_calib"]
@@ -78,8 +79,12 @@ def main():
         reader = csv.DictReader(open(rpath))
         # Captured before the rows are mutated below: the fp16 row is filled in
         # place, so reading its keys afterwards would under-report what was new.
-        orig_cols = list(reader.fieldnames or [])
-        rows = list(reader)
+        # Retired column spellings are folded to the current ones on read, so
+        # the drift guard below compares a stored cr_archive against a freshly
+        # computed cr_archive as the same quantity instead of silently adding a
+        # second column and validating neither.
+        orig_cols = [canonical(c) for c in (reader.fieldnames or [])]
+        rows = [canonicalize_row(r) for r in reader]
         cfg = Config.from_dict(yaml.safe_load(open(os.path.join(path, "config.yaml"))))
         if not torch.cuda.is_available():
             cfg.model.device = cfg.model.master_device = "cpu"
@@ -106,7 +111,7 @@ def main():
                 r.setdefault("cr_dense", 1.0)
                 r.setdefault("param_reduction", 0.0)
                 r.setdefault("n_alive_total", float(n_all))
-                r.setdefault("cr_archival", 1.0)
+                r.setdefault("cr_archive", 1.0)
                 out.append(r)
                 continue
             s = comp.apply(x).cost.summary()

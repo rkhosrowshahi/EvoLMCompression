@@ -56,7 +56,7 @@ def main():
                          "per weight position and is blind to pruning")
     ap.add_argument("--objectives", default=None,
                     help="comma-separated objective names, e.g. "
-                         "ppl_proxy,bpw_target,cr_archival. Default is the "
+                         "ppl_proxy,bpw_target,cr_archive. Default is the "
                          "two-objective problem.")
     args = ap.parse_args()
 
@@ -111,8 +111,8 @@ def main():
             ppl = perplexity(comp.model, windows, device=comp.device)
             s = cand.cost.summary()
             print(f"{'K=%d t=%.1f' % (k, t):<22}{ppl:>10.3f}"
-                  f"{s['bpw_target']:>8.2f}{s['cr_deployable']:>8.2f}"
-                  f"{s['cr_archival']:>9.2f}{s['sparsity']:>8.3f}"
+                  f"{s['bpw_target']:>8.2f}{s['cr_deploy']:>8.2f}"
+                  f"{s['cr_archive']:>9.2f}{s['sparsity']:>8.3f}"
                   f"{cand.apply_seconds:>8.2f}")
     comp.restore()
 

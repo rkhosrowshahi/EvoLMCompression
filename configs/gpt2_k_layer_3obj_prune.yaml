@@ -12,13 +12,13 @@
 #
 # f1  ppl_proxy    proxy perplexity on the held-in calibration windows  (min)
 # f2  bpw_target   DEPLOYABLE bits per weight over the target matrices  (min)
-# f3  cr_archival  ARCHIVAL compression ratio over the whole checkpoint (MAX)
+# f3  cr_archive  ARCHIVAL compression ratio over the whole checkpoint (MAX)
 #
 # f2 is built from `target_bits_deployable` (fixed-width indices, what a LUT
 # dequant kernel reads); f3 from `target_bits_archival` (entropy-coded, what a
 # checkpoint costs to store). Different bit totals, so nothing links them
 # algebraically. Pairing two measures from the SAME total -- e.g. bpw_model
-# with cr_deployable, which is exactly 16/bpw_model -- reproduces the
+# with cr_deploy, which is exactly 16/bpw_model -- reproduces the
 # 2-objective front exactly; the search warns at startup if you try it.
 #
 # -- WHY PRUNING IS THE POINT HERE --------------------------------------------
@@ -164,7 +164,7 @@ search:
   # Names match the keys in ModelCost.summary() (codec.py), plus `ppl_proxy`
   # for the fitness. Direction is implied by the name: everything is minimized
   # except the cr_* ratios, which are maximized and negated internally.
-  objectives: [ppl_proxy, bpw_target, cr_archival]
+  objectives: [ppl_proxy, bpw_target, cr_archive]
 
   # Sweeps K and the pruning band together along one diagonal -- see point 1
   # above. This is NOT the fixed-bit baseline curve that the no-prune configs
@@ -239,7 +239,7 @@ plot:
 # NSGA-II. Non-dominated sorting loses discrimination as objectives are added,
 # so more of each population lands in rank 1 and selection leans on crowding
 # distance, which is a poorer discriminator in 3-D than in 2-D. The no-prune
-# layer run already showed the widest headroom (24.9% cr_archival spread at
+# layer run already showed the widest headroom (24.9% cr_archive spread at
 # matched bpw_target around 6 bpw, 23% more non-dominated points), so if THIS
 # front is not better than the block-wise one, re-run with algorithm: unsga3
 # before concluding that finer granularity does not help. The two hypotheses

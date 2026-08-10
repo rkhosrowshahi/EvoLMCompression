@@ -72,10 +72,10 @@
 # obvious follow-up: the embedding plausibly tolerates a very different sparsity
 # from the projections, and this encoding cannot say so.
 #
-# -- READ cr_deployable, NOT bpw_target ---------------------------------------
+# -- READ cr_deploy, NOT bpw_target ---------------------------------------
 #
 # bpw_target moves much less than CR does; the whole effect of adding a 38.6M
-# tensor lands on the ratio. cr_deployable is in report_metrics below for that
+# tensor lands on the ratio. cr_deploy is in report_metrics below for that
 # reason. It must NOT be made an objective: untouched is now only 14.5 Mbits, so
 # it is a near-monotone transform of bpw_target and check_redundancy would
 # rightly flag the pair. Objectives stay PPL + BPW.
@@ -158,9 +158,9 @@ search:
   seed: 0
 
   objectives: [ppl_proxy, bpw_target]
-  # cr_deployable is where adding wte is visible; sparsity is the pruning knob.
+  # cr_deploy is where adding wte is visible; sparsity is the pruning knob.
   # Both reported per generation, neither optimized.
-  report_metrics: [cr_deployable, sparsity]
+  report_metrics: [cr_deploy, sparsity]
 
   init: linspace
   warm_start: true

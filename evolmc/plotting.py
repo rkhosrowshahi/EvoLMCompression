@@ -484,8 +484,19 @@ class ParetoPlotter:
         fig, ax = plt.subplots(figsize=(side, side), facecolor=t["surface"])
         ax.set_facecolor(t["surface"])
         ax.set_box_aspect(1)
-        ax.plot(gens, hv, lw=1.8, color=t["front"], marker="o", ms=4,
-                mfc=t["front"], mec=t["surface"], mew=1.0)
+        # Marker density has to track the generation count, or a long run
+        # renders as disconnected specks with no visible curve. Each marker
+        # carries a surface-colored ring (mec/mew) to separate it from its
+        # neighbours; at 100 generations across a 3.5in column the points sit
+        # ~0.035in apart against a 4pt (~0.055in) marker, so the rings read as
+        # separation. At 1000 generations the spacing drops to ~0.0035in, the
+        # markers overlap 16x, and every ring erases the previous marker's fill
+        # AND the line beneath it. Thin the markers to a fixed ~100 and the
+        # curve stays continuous at any budget.
+        n = len(gens)
+        ms, every = (4, 1) if n <= 120 else (3, max(1, n // 100))
+        ax.plot(gens, hv, lw=1.8, color=t["front"], marker="o", ms=ms,
+                markevery=every, mfc=t["front"], mec=t["surface"], mew=1.0)
         pt = self.base_pt
         ax.set_xlabel("generation", fontsize=pt, color=t["ink_2"])
         ax.set_ylabel("hypervolume (normalized)", fontsize=pt, color=t["ink_2"])
@@ -599,9 +610,8 @@ class ParetoPlotter:
         ax.grid(True, which="major", color=t["grid"], lw=0.8, zorder=0)
         ax.grid(True, which="minor", color=t["grid"], lw=0.4, alpha=0.6, zorder=0)
         ax.set_axisbelow(True)
-        for side in ("top", "right"):
-            ax.spines[side].set_visible(False)
-        for side in ("left", "bottom"):
+        for side in ("top", "right", "left", "bottom"):
+            ax.spines[side].set_visible(True)
             ax.spines[side].set_color(t["axis"])
             ax.spines[side].set_linewidth(1.0)
         ax.tick_params(which="major", colors=t["muted"],
@@ -824,9 +834,8 @@ def _finish(fig, ax, cfg, theme, pt, stem, legend=True, title=None):
     ax.grid(True, which="minor", color=theme["grid"], lw=0.4, alpha=0.6,
             zorder=0)
     ax.set_axisbelow(True)
-    for side in ("top", "right"):
-        ax.spines[side].set_visible(False)
-    for side in ("left", "bottom"):
+    for side in ("top", "right", "left", "bottom"):
+        ax.spines[side].set_visible(True)
         ax.spines[side].set_color(theme["axis"])
         ax.spines[side].set_linewidth(1.0)
     ax.tick_params(which="major", colors=theme["muted"], labelsize=pt - 1,

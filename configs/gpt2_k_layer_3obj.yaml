@@ -12,7 +12,7 @@
 #
 # f1  ppl_proxy    proxy perplexity on the held-in calibration windows  (min)
 # f2  bpw_target   DEPLOYABLE bits per weight over the target matrices  (min)
-# f3  cr_archival  ARCHIVAL compression ratio over the whole checkpoint (MAX)
+# f3  cr_archive  ARCHIVAL compression ratio over the whole checkpoint (MAX)
 #
 # f2 and f3 are not the same number in different units. f2 is built from
 # `target_bits_deployable` (fixed-width indices, what a LUT dequant kernel
@@ -20,10 +20,10 @@
 # costs to store). See codec.py -- the two totals are computed separately and
 # nothing links them algebraically.
 #
-# The pairing that DOES NOT work, for reference: cr_deployable is exactly
+# The pairing that DOES NOT work, for reference: cr_deploy is exactly
 # 16 / bpw_model, so putting it opposite any bits-per-weight objective yields a
 # front numerically identical to the 2-objective run. Verified on the finished
-# runs: cr_deployable * bpw_model == 16.000 for every front member.
+# runs: cr_deploy * bpw_model == 16.000 for every front member.
 #
 # Scope differs between f2 and f3 on purpose. f2 covers the 84.9M compressed
 # projection weights, which is what GPTQ/AWQ/SqueezeLLM tables quote. f3 covers
@@ -50,7 +50,7 @@
 #   block     0.989    0.9895    0.9185     4.08%       300 ->  377  (+26%)
 #   layer     0.991    0.9906    0.9267     3.67%       326 ->  401  (+23%)
 #
-# cr_archival spread among candidates at MATCHED bpw_target:
+# cr_archive spread among candidates at MATCHED bpw_target:
 #
 #   bpw_target    global   block   layer
 #      ~2          1.5%     7.4%    7.7%
@@ -150,7 +150,7 @@ search:
   # except the cr_* ratios, which are maximized and negated internally.
   #
   # Two objectives here reproduces the paired 2-objective run exactly.
-  objectives: [ppl_proxy, bpw_target, cr_archival]
+  objectives: [ppl_proxy, bpw_target, cr_archive]
 
   # Generation 0 is pop_size uniform-K individuals with K spread evenly in LOG
   # space, so it lies exactly on the fixed-bit baseline curve and spans it end

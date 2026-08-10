@@ -12,13 +12,13 @@
 #
 # f1  ppl_proxy    proxy perplexity on the held-in calibration windows  (min)
 # f2  bpw_target   DEPLOYABLE bits per weight over the target matrices  (min)
-# f3  cr_archival  ARCHIVAL compression ratio over the whole checkpoint (MAX)
+# f3  cr_archive  ARCHIVAL compression ratio over the whole checkpoint (MAX)
 #
 # f2 is built from `target_bits_deployable` (fixed-width indices, what a LUT
 # dequant kernel reads); f3 from `target_bits_archival` (entropy-coded, what a
 # checkpoint costs to store). Different bit totals, so nothing links them
 # algebraically. Pairing two measures from the SAME total -- e.g. bpw_model
-# with cr_deployable, which is exactly 16/bpw_model -- reproduces the
+# with cr_deploy, which is exactly 16/bpw_model -- reproduces the
 # 2-objective front exactly; the search warns at startup if you try it.
 #
 # -- WHY PRUNING IS THE POINT HERE --------------------------------------------
@@ -164,7 +164,7 @@ search:
   # Names match the keys in ModelCost.summary() (codec.py), plus `ppl_proxy`
   # for the fitness. Direction is implied by the name: everything is minimized
   # except the cr_* ratios, which are maximized and negated internally.
-  objectives: [ppl_proxy, bpw_target, cr_archival]
+  objectives: [ppl_proxy, bpw_target, cr_archive]
 
   # Sweeps K and the pruning band together along one diagonal -- see point 1
   # above. This is NOT the fixed-bit baseline curve that the no-prune configs
@@ -237,7 +237,7 @@ plot:
 
 # NOTE: the no-prune sweep already found real f2/f3 conflict here -- 4.08% of
 # candidate pairs disagree and the third objective admitted 26% more
-# non-dominated points, with cr_archival spanning 22.8% at matched bpw_target
+# non-dominated points, with cr_archive spanning 22.8% at matched bpw_target
 # around 6 bpw. Pruning adds a second, independent source of that separation.
 # Expect the widest fronts of the six runs to come from block and layer with
 # pruning on. The comparison that matters is against gpt2_k_block_3obj.yaml at

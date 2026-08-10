@@ -18,6 +18,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from evolmc import Compressor, CompressionProblem, Config  # noqa: E402
 from evolmc.data import build_splits  # noqa: E402
+from evolmc import latency as latency_mod  # noqa: E402
 from evolmc.rundir import RunDir, find_run  # noqa: E402
 from evolmc.search import run_search, save_front  # noqa: E402
 
@@ -76,7 +77,27 @@ def main():
     run.log(f"\nsearch: {cfg.search.algorithm} pop={cfg.search.pop_size} "
             f"gen={cfg.search.n_gen} -> ~{budget} evaluations")
 
-    problem = CompressionProblem(comp, splits["proxy"], cfg, run=run)
+    # `latency_proxy` is PREDICTED from the per-layer bit accounting against
+    # coefficients fitted once on this GPU and frozen to a file. The fit costs a
+    # few seconds; every candidate afterwards costs only arithmetic.
+    latency = None
+    if "latency_proxy" in tuple(cfg.search.objectives) + tuple(
+            cfg.search.report_metrics):
+        latency = latency_mod.load_or_calibrate(comp, cfg, log=run.log)
+        run.log(latency.describe())
+        # Numeric redundancy check. A config-shaped heuristic gets this wrong:
+        # under bitmap the mask floors bytes at 1 bit/position, so the memory
+        # roof can bind everywhere even with pruning on, leaving latency an
+        # affine copy of the size objective.
+        lo, hi = min(comp.genome.k_choices), max(comp.genome.k_choices)
+        for k in (lo, hi):
+            c = comp.apply(comp.genome.encode_uniform(k))
+            b, t, verdict = latency.roof_diagnostic(c.cost)
+            run.log(f"  roof at K={k}: {b}/{t} layers compute-bound -- {verdict}")
+        comp.restore()
+
+    problem = CompressionProblem(comp, splits["proxy"], cfg, run=run,
+                                 latency=latency)
     try:
         res, records = run_search(problem, cfg, run, resume_from=resume_ckpt)
         save_front(res, problem, cfg, run)

@@ -104,7 +104,7 @@ a run with `tail -f`:
 {"eval": 16, "t": 3.48, "eval_seconds": 0.537, "apply_seconds": 0.366,
  "ppl_proxy": 8554355.8, "x": [0.1, 0.1, 0.1, 0.0, 0.0],
  "bpw_target": 2.0625, "bpw_target_archival": 1.70962, "bpw_model": 6.48715,
- "cr_deployable": 2.46641, "cr_archival": 2.56152, "sparsity": 0.0, ...}
+ "cr_deploy": 2.46641, "cr_archive": 2.56152, "sparsity": 0.0, ...}
 ```
 
 The full genome `x` is stored on every line, so any evaluation from any run can
@@ -280,7 +280,7 @@ Any integer K in [2, 8192], pruning off.
 | `gpt2_k_layer.yaml` | `block_type` | 48 | 8191^48 |
 
 ```bash
-bash scripts/run_gpt2_k_experiments.sh
+bash scripts/gpt2_granularity.sh
 ```
 
 Runs all three sequentially, then evaluates each front on full WikiText-2.
@@ -390,9 +390,9 @@ distribution that the entropy coder then exploits. It is why nominal `K` buys
 ## Four things this codebase is opinionated about
 
 **1. Report two compression ratios and never mix them.**
-`cr_deployable` uses fixed-width indices — this is what a LUT dequant kernel
+`cr_deploy` uses fixed-width indices — this is what a LUT dequant kernel
 reads, and the only number that supports a memory or latency claim.
-`cr_archival` uses Huffman-coded indices — a smaller checkpoint that must be
+`cr_archive` uses Huffman-coded indices — a smaller checkpoint that must be
 decoded before use, valid only for storage/transmission claims. Both come out
 of every evaluation. Similarly `bpw_target` (compressed matrices only, what the
 GPTQ/AWQ tables quote) is reported next to `bpw_model` (whole checkpoint).

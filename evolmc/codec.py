@@ -10,11 +10,12 @@ This is the part reviewers attack, so every bit is charged explicitly:
 
 Two compression ratios are reported and they must never be mixed:
 
-  deployable -- fixed-width indices; this is what a LUT dequant kernel reads,
-                and the number to quote for any memory or latency claim.
-  archival   -- entropy-coded indices; a smaller checkpoint that must be
+  deployable -- fixed-width indices, NO entropy coding; this is what a LUT
+                dequant kernel reads, and the number to quote for any memory
+                or latency claim. Reported as `cr_deploy`.
+  archive    -- Huffman-coded indices; a smaller checkpoint that must be
                 decoded before it can be used. Quote this only for
-                storage/transmission claims.
+                storage/transmission claims. Reported as `cr_archive`.
 
 `bpw_target` counts only the compressed projection matrices, which is what the
 GPTQ/AWQ/SqueezeLLM tables report. `bpw_model` counts the whole checkpoint,
@@ -372,13 +373,30 @@ class ModelCost:
         )
 
     @property
-    def cr_deployable(self) -> float:
+    def n_lookups(self) -> float:
+        """LUT lookups a dequant kernel performs over the target matrices.
+
+        The second term of the latency model, and the reason latency is not
+        simply a restatement of the deployable byte count.
+
+        Under `dense` every weight POSITION carries an index, so the kernel
+        looks up once per position no matter how much was pruned -- constant
+        across candidates. Under `bitmap` or `csr` only SURVIVORS carry an
+        index, so this falls with sparsity while the byte count falls with both
+        sparsity and K. Two candidates can therefore match on bytes and differ
+        on lookups, which is exactly the freedom a latency objective needs.
+        """
+        return float(sum(l.n_weights if l.fmt == "dense" else l.n_alive
+                         for l in self.layers))
+
+    @property
+    def cr_deploy(self) -> float:
         return self.original_bits / max(
             self.target_bits_deployable + self.untouched_bits, 1e-9
         )
 
     @property
-    def cr_archival(self) -> float:
+    def cr_archive(self) -> float:
         return self.original_bits / max(
             self.target_bits_archival + self.untouched_bits, 1e-9
         )
@@ -413,13 +431,22 @@ class ModelCost:
             "bpw_target_archival": self.bpw_target_archival,
             "bpw_model": self.bpw_model,
             "bpw_model_archival": self.bpw_model_archival,
-            "cr_deployable": self.cr_deployable,
-            "cr_archival": self.cr_archival,
+            "cr_deploy": self.cr_deploy,
+            "cr_archive": self.cr_archive,
             "cr_dense": self.cr_dense,
             "sparsity": self.sparsity,
             "param_reduction": self.param_reduction,
             "n_alive_total": float(self.n_alive_total),
+            "n_lookups": self.n_lookups,
             "mean_k_used": self.mean_k_used,
+            # Memory in BYTES. The MB columns below are the same numbers
+            # scaled; bytes are what a deployment budget is actually quoted in
+            # and they avoid a MiB-vs-MB ambiguity in a results table.
+            "bytes_original": self.original_bits / 8,
+            "bytes_deployable": (self.target_bits_deployable
+                                 + self.untouched_bits) / 8,
+            "bytes_archive": (self.target_bits_archival
+                              + self.untouched_bits) / 8,
             "size_mb_original": self.original_bits / 8 / 2**20,
             "size_mb_deployable": (self.target_bits_deployable + self.untouched_bits)
             / 8
@@ -437,8 +464,8 @@ class ModelCost:
         return (
             f"bpw  target {s['bpw_target']:.3f} (arch {s['bpw_target_archival']:.3f})"
             f" | model {s['bpw_model']:.3f} (arch {s['bpw_model_archival']:.3f})\n"
-            f"CR   deployable {s['cr_deployable']:.2f}x"
-            f" | archival {s['cr_archival']:.2f}x\n"
+            f"CR   deploy {s['cr_deploy']:.2f}x (no Huffman)"
+            f" | archive {s['cr_archive']:.2f}x (Huffman)\n"
             f"size {s['size_mb_original']:.0f} MB -> {s['size_mb_deployable']:.0f} MB"
             f" (archival {s['size_mb_archival']:.0f} MB)\n"
             f"sparsity {s['sparsity']:.3f} | mean codewords used {s['mean_k_used']:.1f}"

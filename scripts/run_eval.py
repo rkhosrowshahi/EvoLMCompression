@@ -29,6 +29,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import numpy as np  # noqa: E402
 
 from evolmc import Compressor, Config, perplexity  # noqa: E402
+from evolmc import benchmark as bench  # noqa: E402
 from evolmc.data import build_splits  # noqa: E402
 from evolmc.evaluate import rank_correlation  # noqa: E402
 from evolmc.plotting import (  # noqa: E402
@@ -45,15 +46,40 @@ from evolmc.rundir import find_run  # noqa: E402
 LEAD = ["tag", "ppl_eval", "ppl_calib"]
 
 
-def evaluate_genome(comp, x, w_eval, w_calib, tag):
-    """Score one genome on both corpora from a single quantization."""
+def evaluate_genome(comp, x, w_eval, w_calib, tag, cfg=None, ref=None,
+                    do_measure=False):
+    """Score one genome on both corpora from a single quantization.
+
+    When `ref` is present, also attaches the runtime columns. Two kinds, and the
+    names keep them apart:
+
+      measured_*   timed on the live model. CONSTANT across a front, because
+                   compression here is simulated and every candidate executes
+                   the same dense fp16 graph. Carried anyway, because the
+                   constancy is the evidence for that claim.
+      *_projected  weight term from the bit accounting, runtime terms from the
+                   fp16 reference. These are what vary and what a table should
+                   report. See evolmc/benchmark.py for what each assumes.
+    """
     cand = comp.apply(x)
-    return {
+    row = {
         "tag": tag,
         "ppl_eval": round(perplexity(comp.model, w_eval, device=comp.device), 4),
         "ppl_calib": round(perplexity(comp.model, w_calib, device=comp.device), 4),
         **{k: round(v, 5) for k, v in cand.cost.summary().items()},
     }
+    if ref is not None:
+        s = cand.cost.summary()
+        row["peak_mb_projected"] = bench.project_peak_mb(
+            s["size_mb_deployable"], ref)
+        row["latency_ms_projected"] = bench.project_latency_ms(
+            s["size_mb_deployable"], ref)
+        if do_measure:
+            m = bench.measure(comp.model, comp.tokenizer, cfg.benchmark,
+                              device=comp.device)
+            if m is not None:
+                row.update(m.row(prefix="measured_"))
+    return row
 
 
 def write_results(path, rows):
@@ -78,6 +104,9 @@ def main():
     ap.add_argument("--out", default=None)
     ap.add_argument("--skip-baselines", action="store_true")
     ap.add_argument("--no-plots", action="store_true")
+    ap.add_argument("--no-benchmark", action="store_true",
+                    help="skip the latency / peak-memory measurement even when "
+                         "benchmark.enabled is true in the config")
     args = ap.parse_args()
 
     cfg = Config.from_yaml(args.config)
@@ -93,6 +122,40 @@ def main():
     print(f"calib    : {w_calib.shape[0]} x {w_calib.shape[1]} tokens of "
           f"{calib_name} (what the search optimized)\n")
 
+    # -- fp16 runtime reference ---------------------------------------------
+    # Measured BEFORE any genome is applied, so the model is genuinely
+    # untouched. Everything the projections need comes from this one point: the
+    # weight term they replace, and the KV/activation/workspace term they carry
+    # over unchanged.
+    ref = None
+    if cfg.benchmark.enabled and not args.no_benchmark:
+        b = cfg.benchmark
+        print(f"benchmark protocol : {b.gen_tokens} single-token decode steps, "
+              f"batch {b.batch_size}, past_key_values carried, CUDA-synced per "
+              f"step
+                     (SqueezeLLM llama.py benchmark(); "
+              f"latency is the MEDIAN PER-TOKEN time)")
+        ref = bench.measure(comp.model, comp.tokenizer, b, device=comp.device)
+        if ref is None:
+            print("  SKIPPED: peak-memory figures come from the CUDA allocator "
+                  "and the model is not on CUDA.\n")
+        else:
+            print(f"  fp16 latency     {ref.latency_ms:9.4f} ms/token "
+                  f"(p10 {ref.latency_ms_p10:.4f}, p90 {ref.latency_ms_p90:.4f})"
+                  f"  over {ref.n_tokens} steps = {ref.total_ms:.1f} ms total")
+            print(f"  fp16 peak bytes  {ref.peak_alloc_bytes:>12,.0f} B sampled "
+                  f"({ref.peak_alloc_bytes_true:,.0f} B true)")
+            print(f"  fp16 peak alloc  {ref.peak_alloc_mb:9.2f} MB sampled "
+                  f"(true {ref.peak_alloc_mb_true:.2f}, "
+                  f"reserved {ref.peak_reserved_mb:.2f} MB)")
+            print(f"  decomposed       {ref.weight_mb:9.2f} MB weights + "
+                  f"{ref.runtime_mb:.2f} MB KV/activations/workspace")
+            print("  NOTE compression here is SIMULATED -- every candidate runs "
+                  "the same dense fp16\n       model -- so the measured_* "
+                  "columns below are constant by construction. The\n"
+                  "       per-candidate numbers to report are *_projected. "
+                  "See evolmc/benchmark.py.\n")
+
     rows = []
     fp16_eval = perplexity(comp.model, w_eval, device=comp.device)
     fp16_calib = perplexity(comp.model, w_calib, device=comp.device)
@@ -103,22 +166,32 @@ def main():
                  "ppl_eval": round(fp16_eval, 4), "ppl_calib": round(fp16_calib, 4),
                  "bpw_target": 16.0, "bpw_target_archival": 16.0,
                  "bpw_model": 16.0, "bpw_model_archival": 16.0,
-                 "cr_deployable": 1.0, "cr_archival": 1.0, "cr_dense": 1.0,
+                 "cr_deploy": 1.0, "cr_archive": 1.0, "cr_dense": 1.0,
                  "sparsity": 0.0, "param_reduction": 0.0,
                  "n_alive_total": float(comp.master.n_target_weights
                                         + comp.n_untouched)})
+    if ref is not None:
+        # The reference row carries the measurement itself, and its projections
+        # are trivially equal to it -- fp16 IS the deployable format here. Stated
+        # rather than left blank so the CSV has a row where measured and
+        # projected provably agree, which is the sanity check on the projection.
+        rows[-1].update(ref.row(prefix="measured_"))
+        rows[-1]["peak_mb_projected"] = round(ref.peak_alloc_mb_true, 3)
+        rows[-1]["latency_ms_projected"] = round(ref.latency_ms, 3)
     print(f"{'':<22}{eval_name:>12}{calib_name:>12}")
     print(f"{'fp16':<22}{fp16_eval:>12.3f}{fp16_calib:>12.3f}")
 
     baselines = []
     if not args.skip_baselines:
-        for k in comp.genome.k_choices:
+        for i, k in enumerate(comp.genome.k_choices):
             r = evaluate_genome(comp, comp.genome.encode_uniform(k), w_eval,
-                                w_calib, f"uniform-K{k}")
+                                w_calib, f"uniform-K{k}", cfg=cfg, ref=ref,
+                                do_measure=ref is not None
+                                and i % max(cfg.benchmark.every, 1) == 0)
             rows.append(r)
             baselines.append((r["bpw_target"], r["ppl_eval"]))
             print(f"{r['tag']:<22}{r['ppl_eval']:>12.3f}{r['ppl_calib']:>12.3f}"
-                  f"   bpw {r['bpw_target']:5.2f}  CR {r['cr_deployable']:5.2f}x")
+                  f"   bpw {r['bpw_target']:5.2f}  CR {r['cr_deploy']:5.2f}x")
 
     front = []
     if front_path and os.path.exists(front_path):
@@ -126,18 +199,43 @@ def main():
             members = json.load(f)["front"]
         for i, member in enumerate(members):
             r = evaluate_genome(comp, np.array(member["x"]), w_eval, w_calib,
-                                f"front-{i:02d}")
+                                f"front-{i:02d}", cfg=cfg, ref=ref,
+                                do_measure=ref is not None
+                                and i % max(cfg.benchmark.every, 1) == 0)
             rows.append(r)
             front.append(r)
-            print(f"{r['tag']:<22}{r['ppl_eval']:>12.3f}{r['ppl_calib']:>12.3f}"
-                  f"   bpw {r['bpw_target']:5.2f}  CR {r['cr_deployable']:5.2f}x"
-                  f"  (archival {r['cr_archival']:.2f}x)")
+            line = (f"{r['tag']:<22}{r['ppl_eval']:>12.3f}{r['ppl_calib']:>12.3f}"
+                    f"   bpw {r['bpw_target']:5.2f}  CR {r['cr_deploy']:5.2f}x"
+                    f"  (archive {r['cr_archive']:.2f}x)")
+            if ref is not None:
+                line += (f"  ->{r['peak_mb_projected']:8.0f} MB"
+                         f" {r['latency_ms_projected']:8.3f} ms/tok proj")
+            print(line)
     comp.restore()
 
     out = args.out or os.path.join(run_path or ".", "data", "results.csv")
     os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
     cols = write_results(out, rows)
     print(f"\nwrote {out}  ({len(cols)} columns, {len(rows)} rows)")
+
+    if ref is not None and front:
+        print(f"\nruntime over {len(front)} front members")
+        print("  MEASURED (expect no spread -- simulated compression, one graph)")
+        for key in ("measured_latency_ms", "measured_peak_alloc_mb"):
+            text = bench.summarize_spread(
+                front, key, ref if key.endswith("latency_ms") else None)
+            print("    " + text.replace("\n    ", "\n      "))
+        print("  PROJECTED (this is what a results table should carry)")
+        for key in ("latency_ms_projected", "peak_mb_projected"):
+            print("    " + bench.summarize_spread(front, key, None))
+        best = min(front, key=lambda r: r["peak_mb_projected"])
+        print(f"  smallest projected footprint: {best['tag']} at "
+              f"{best['peak_mb_projected']:.0f} MB "
+              f"({ref.peak_alloc_mb / max(best['peak_mb_projected'], 1e-9):.2f}x "
+              f"under fp16), ppl_eval {best['ppl_eval']:.3f}")
+        print("  Projections assume a kernel that is perfectly weight-bandwidth "
+              "bound and add no\n  dequant cost. They bound the available "
+              "speedup; they are not measurements.")
 
     if not front:
         return

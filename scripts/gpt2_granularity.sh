@@ -6,8 +6,8 @@
 # Doing the eval straight away means a crash later still leaves you with
 # complete results for everything finished so far.
 #
-#   bash scripts/run_gpt2_k_experiments.sh
-#   bash scripts/run_gpt2_k_experiments.sh --n-gen 5 --pop 20   # quick trial
+#   bash scripts/gpt2_granularity.sh
+#   bash scripts/gpt2_granularity.sh --n-gen 5 --pop 20   # quick trial
 #
 # Extra arguments are forwarded to run_search.py.
 

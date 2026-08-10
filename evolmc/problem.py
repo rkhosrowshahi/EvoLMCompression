@@ -13,7 +13,7 @@ bpw is preferred over -CR for the size axis because it is linear in the thing
 the search actually controls and because every baseline in the literature is
 quoted in bits. CR is derived and logged alongside, and can be made an
 objective in its own right -- but only usefully when it is drawn from a
-*different* bit total than the bpw objective, since `cr_deployable` is exactly
+*different* bit total than the bpw objective, since `cr_deploy` is exactly
 `16 / bpw_model` and adds nothing next to any deployable bpw measure.
 
 Optional constraint: g1 = bpw - max_bpw <= 0, always applied to the
@@ -28,23 +28,31 @@ import numpy as np
 from pymoo.core.problem import ElementwiseProblem
 
 from .evaluate import proxy_fitness
-from .objectives import ObjectiveSet
+from .objectives import ObjectiveSet, canonical
 
 
 class CompressionProblem(ElementwiseProblem):
-    def __init__(self, compressor, windows, cfg, run=None):
+    def __init__(self, compressor, windows, cfg, run=None, latency=None):
         self.compressor = compressor
         self.windows = windows
         self.cfg = cfg
         self.run = run
+        # latency.LatencyProxy: coefficients fitted once on the target GPU and
+        # frozen. Required only when `latency_proxy` is an objective or a
+        # reported metric; None otherwise, and then `latency_proxy` is simply
+        # not in the summary the objective set reads from.
+        self.latency = latency
         self.history: list[dict] = []
         self.n_baseline_evals = 0
         self._t0 = time.perf_counter()
         self.objectives = ObjectiveSet(getattr(cfg.search, "objectives", None))
         # Reported per generation but never optimized; must not collide with an
-        # objective, or the log would print the same column twice.
+        # objective, or the log would print the same column twice. Canonicalized
+        # first, so a config naming a retired spelling still collides correctly
+        # with the objective it duplicates rather than slipping through as an
+        # extra column of the same numbers.
         self.report_metrics = tuple(
-            m for m in getattr(cfg.search, "report_metrics", ())
+            m for m in map(canonical, getattr(cfg.search, "report_metrics", ()))
             if m not in self.objectives.names)
 
         xl, xu = compressor.genome.bounds()
@@ -63,6 +71,13 @@ class CompressionProblem(ElementwiseProblem):
                             device=self.compressor.device)
 
         summary = cand.cost.summary()
+        if self.latency is not None:
+            # Predicted, not timed. Pure arithmetic over the per-layer bit
+            # accounting against frozen coefficients, so it costs nothing per
+            # candidate -- the only reason a latency axis is affordable across
+            # 10,000 evaluations. See evolmc/latency.py for the model and for
+            # which constants are measured and which are stated.
+            summary["latency_proxy"] = self.latency.predict(cand.cost)
         values = self.objectives.values(ppl, summary)
         out["F"] = self.objectives.to_min(values)
 

@@ -46,12 +46,12 @@
 # the remaining 0.37x was unreachable by any genome. That ceiling was the fp16
 # embedding, not the method.
 #
-# -- READ cr_deployable, NOT bpw_target ---------------------------------------
+# -- READ cr_deploy, NOT bpw_target ---------------------------------------
 #
 # bpw_target will look almost UNCHANGED against the old runs. At per_tensor the
 # codebook is ~0.06 bpw, so bpw_target is essentially ceil(log2 K) whether or
 # not lm_head is in the target set; only the denominator moved (84.9M ->
-# 123.5M). The whole effect lands on cr_deployable, which is why it is added to
+# 123.5M). The whole effect lands on cr_deploy, which is why it is added to
 # report_metrics below. Expected, at uniform bpw:
 #
 #     bpw   CR before   CR after
@@ -60,7 +60,7 @@
 #       4     2.05x       3.91x
 #       8     1.52x       1.99x
 #
-# Note this also makes cr_deployable a near-monotone transform of bpw_target
+# Note this also makes cr_deploy a near-monotone transform of bpw_target
 # (untouched is now only 14.5 Mbits of the total), so the two must NOT be paired
 # as objectives -- objectives.check_redundancy would rightly flag it. The
 # objective pair stays PPL + BPW.
@@ -144,9 +144,9 @@ search:
   n_gen: 1000
   seed: 0
   objectives: [ppl_proxy, bpw_target]
-  # cr_deployable is where this change is visible; bpw_target barely moves.
+  # cr_deploy is where this change is visible; bpw_target barely moves.
   # Reported per generation, never optimized (see the redundancy note above).
-  report_metrics: [cr_deployable]
+  report_metrics: [cr_deploy]
   init: linspace
   warm_start: true
   baseline_sweep: true       # 13 fixed-K reference points, now incl. lm_head

@@ -1,0 +1,347 @@
+# GPT-2 target-set comparison -- block-wise K, full target set (no exclusions),
+# uniform quantization only.
+#
+# 13 decision variables (13 K).
+#
+# One of NINE configs answering a single question: HOW MUCH OF THE MODEL SHOULD
+# THE SEARCH BE ALLOWED TO COMPRESS?
+#
+#     K grouping        x   target set
+#     global (1 K)          no_head     blocks only; LM head + embeddings fp16
+#     block  (12 K)         with_head   + the tied LM head / token embedding
+#     layer  (48 K)         all         + the positional table; only norms and
+#                                         biases left in fp16
+#
+#   gpt2_scope_{global,block,layer}_{no_head,with_head,all}_{uq,uq_pruning}.yaml
+#
+# Within one method the cells differ in exactly two places:
+# `variables.k_grouping` and the `model` target-set block. Everything else is
+# byte-identical, so any difference between fronts is attributable to the cell.
+#
+# -- objectives (TWO) ---------------------------------------------------------
+#
+# f1  ppl_proxy   proxy perplexity on the held-in calibration windows   (min)
+# f2  bpw_model   effective bits per weight, WHOLE checkpoint           (min)
+#
+# f2 is `bpw_model`, NOT `bpw_target`, and on this experiment that is not a
+# stylistic choice -- it is the only thing that makes the comparison mean
+# anything. bpw_target divides by whatever happens to be in the target set, so
+# all three cells would span 1 to 16 bits and the difference between them would
+# vanish into the denominator. Dividing by all 124.4M weights puts them on ONE
+# axis: 8 * S_deployable / N, every tensor and every byte of metadata included.
+#
+# The cost: bpw_model is not directly quotable against the GPTQ/AWQ/SqueezeLLM
+# tables, which report the target-set number. `bpw_target` is carried in
+# report_metrics, so the quotable figure is recoverable without re-running.
+#
+# LATENCY AND MEMORY ARE NOT OBJECTIVES. They are measured after the search, on
+# the finished front, by run_eval.py -- see the `benchmark:` block. Latency
+# cannot be a search objective here because compression in this project is
+# SIMULATED: compress_layer returns a reconstructed fp16 tensor and
+# MasterWeights.write copies it in place, so every candidate executes the
+# identical dense fp16 graph and a stopwatch returns the same number every time.
+#
+# -- TARGET SET: FULL -- everything the pipeline can reach ------------------------------------------------
+#
+# ALL. No exclusions. Every 2-D weight matrix in the model is a
+# search target; only the 121,344 weights in norms and biases stay fp16.
+#
+#   target layers        50            (+1: the positional table)
+#   target weights       124,318,464
+#   untouched (fp16)     121,344       (norms + biases only)
+#   untouched share      0.098%
+#   CR ceiling           15.77x        (was 14.42x)
+#
+# EXPECT THIS TO BE A SMALL STEP, and say so. The positional table is 786,432
+# weights, 0.63% of
+# the checkpoint, so the ceiling moves only 14.42x -> 15.77x. The honest framing
+# is not "full beats head" but "head captures essentially all of the available
+# reach, and the last 0.6% is not where the difference lies".
+#
+# WHAT MAKES IT WORTH RUNNING ANYWAY is the perplexity side. It is small but
+# is read on every token at every position, and 1024 x 768 is a very different
+# statistical object from a 768 x 3072 projection -- far fewer weights per
+# codebook row and a much narrower dynamic range. If quantizing it is harmful
+# out of proportion to its size, this cell is where that shows, and the answer
+# feeds directly into whether "quantize everything" is a safe default.
+#
+# THE THREE CELLS SIDE BY SIDE. This is the table the experiment produces:
+#
+#                      no_head      with_head           all
+#   target layers          48             49             50
+#   target weights     84,934,656    123,532,032    124,318,464
+#   untouched (fp16)   39,505,152        907,776        121,344
+#   untouched share        31.7%          0.73%          0.098%
+#   f2 floor            5.762 bpw      1.109 bpw      1.015 bpw
+#   CR ceiling             2.78x         14.42x         15.77x
+#
+# The step from no_head to with_head is enormous and the step from with_head to
+# all is small, which is the point: almost all of no_head's untouched mass is
+# the tied 38.6M-weight token-embedding matrix, and the positional table is
+# only 786k more. So the interesting question is not "does all beat
+# with_head" -- it barely can on size -- but whether
+# either pays for the reach in PERPLEXITY. A 2.78x ceiling is a hard wall no
+# genome can cross; 14.42x is reachable but the head is the most
+# perplexity-sensitive matrix in the model.
+#
+# -- BLOCK-WISE K ---------------------------------------------------------
+#
+# ONE K per transformer block. 12 K variables in the no_head cell; with_head
+# and all add one more group, because lm_head/wte and wpe sit outside the
+# decoder stack and _group_key gives them block=-1, which collapses them into a
+# single "b-1" group.
+#
+# That collapse is worth knowing: at block granularity the head and the
+# positional table SHARE a codebook size. Only the layer-wise cell can give them
+# independent K.
+#
+# -- METHOD: UNIFORM QUANTIZATION ONLY ----------------------------------------
+#
+# Pruning off, so the only decision variables are the K genes. `sparsity` is 0
+# for every candidate by construction and appears in report_metrics purely as
+# the control reading against the paired uq_pruning run.
+#
+# GENERATION 0 LIES EXACTLY ON THE FIXED-BIT BASELINE CURVE. `init: linspace`
+# builds pop_size uniform-K individuals with K spread evenly in log space, so
+# gen 0 spans the baseline end to end and any later movement is unambiguously
+# the search's doing. This claim holds HERE and not in the uq_pruning cells --
+# do not repeat it for those.
+#
+# `deployable_format: dense` rather than bitmap: with nothing pruned a mask
+# would cost 1 bit per weight for no information. This also means the deployed
+# size is exactly ceil(log2 K) per weight plus the codebook, which is the
+# cleanest possible reading of the size axis.
+#
+# -- BUDGET -------------------------------------------------------------------
+#
+# 100 x 500 = 50,000 function evaluations per run, nine runs. This is the real
+# budget: at 50 variables in the layer-wise cells, 10,000 evaluations is thin
+# enough that a weak front is evidence about the optimizer rather than about the
+# design, and the whole point of this experiment is to attribute differences to
+# the target set.
+#
+# 128 windows x 1024 tokens = 131,072 calibration tokens from C4, against the 8
+# windows the earlier sweeps used. The proxy forward pass therefore costs 16x
+# what it did and is no longer negligible next to `apply`, which was ~78% of an
+# evaluation at 8 windows. It is also the entire budget: the cost accounting is
+# microseconds and only perplexity needs the GPU. Time one run before committing
+# to all nine.
+#
+# n_eval_seq stays at 64 (wikitext2), matching every finished run in this
+# directory, so the final evaluation of the front is comparable to them.
+
+model:
+  name: gpt2
+  dtype: float16
+  device: cuda
+  master_device: cuda
+  # NO EXCLUSIONS, plus the flag that makes that mean something.
+  #
+  # An empty exclude list on its own would give exactly the `head` cell, because
+  # the module TYPE filter runs first and both embedding tables are nn.Embedding.
+  # `include_embeddings: true` adds nn.Embedding to the filter, which is the
+  # only way to reach the positional table wpe -- it is referenced by no Linear
+  # anywhere in the model.
+  #
+  # wte is then claimed DIRECTLY as an Embedding rather than through the tied
+  # lm_head. discover_targets dedupes by weight identity, so the shared
+  # Parameter is compressed once and lm_head is skipped; the accounting is
+  # unchanged either way.
+  #
+  # Norms and biases are STILL excluded, structurally: they are 1-D parameters
+  # and the whole pipeline works on [out, in] matrices. "No exclusion" therefore
+  # means "no exclusion among 2-D weight matrices", which is worth stating
+  # plainly in the paper rather than claiming the model is fully quantized.
+  exclude_patterns: []
+  include_embeddings: true
+
+quant:
+  # ONE codebook per layer. A K of ~10^4 is only meaningful this way: GPT-2 rows
+  # hold 768 weights, so a per-channel codebook can never fill more than 768
+  # entries, and 8192 fp16 centroids for a 768-weight row costs 170 bpw of
+  # codebook alone. Per tensor the same codebook costs 0.06 bpw. It is also the
+  # original Deep Compression setup, which makes it the right baseline.
+  granularity: per_tensor
+  binning: uniform           # uniform quantization -- the proposed method
+  # Any INTEGER K in [2, 8192], mapped LOG-spaced because the cost axis is index
+  # width log2(K). A linear map would spend half the gene range above K=4096,
+  # where quality has long plateaued, and leave almost no resolution at small K.
+  k_encoding: integer
+  k_min: 2
+  k_max: 8192
+  # No longer bounds the search. This is the ladder of reference points: the
+  # fixed-bit baselines the front must beat, and the anchors for the plot axes.
+  k_choices: [2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192]
+  codebook_bits: 16
+  # Fixed-width indices, one per weight POSITION. Correct with pruning off:
+  # there are no dead positions, and a bitmap would charge 1 bit per weight for
+  # information the model does not carry.
+  deployable_format: dense
+  csr_span_bits: 4           # unused while deployable_format is dense
+  # The (layer, K) cache is ACTIVE here, unlike the pruning runs. Kept small
+  # because integer K makes almost every candidate a fresh K anyway.
+  cache_entries: 32
+
+prune:
+  enabled: false             # <-- the method line; this cell isolates K
+
+variables:
+  k_grouping: block        # <-- ONE OF THE TWO DESIGN LINES
+  # One threshold for the whole model in every cell, so k_grouping stays the
+  # only search-space variable. Per-block or per-layer thresholds would add 24
+  # or 96 variables and confound granularity with a dimensionality jump.
+  prune_grouping: global
+
+data:
+  calib_dataset: c4
+  eval_dataset: wikitext2
+  # GPT-2's full context window. 2048 is unreachable on any GPT-2 size --
+  # n_positions is 1024 and make_windows feeds seqlen straight into the position
+  # embedding, so a longer window raises an index error on the first forward
+  # pass rather than degrading gracefully.
+  seqlen: 1024
+  n_proxy_seq: 128           # calibration windows behind the fitness signal
+  n_eval_seq: 64             # full evaluation of the final front
+
+search:
+  algorithm: nsga2
+  pop_size: 100
+  n_gen: 500
+  seed: 0
+
+  # TWO objectives. Names come from objectives.REGISTRY; direction is implied by
+  # the name. Order drives the figures: f1 is the y axis, f2 the x axis.
+  objectives: [ppl_proxy, bpw_model]
+  # Carried through the search and logged per generation, never optimized.
+  # bytes_deployable is the deployed memory in BYTES; cr_deploy / cr_archive are
+  # the compression ratios without and with Huffman coding; bpw_target is the
+  # target-set figure that keeps these runs comparable to the
+  # GPTQ/AWQ/SqueezeLLM tables; sparsity is the mechanism behind the size axis.
+  report_metrics: [bytes_deployable, cr_deploy, cr_archive, bpw_target,
+                   sparsity, n_lookups]
+
+  # Sweeps K and the pruning band together along one diagonal -- see point 1 of
+  # the method note. NOT the fixed-bit baseline curve.
+  init: linspace
+  warm_start: true
+  baseline_sweep: true       # the 13 fixed-K reference points, all at t=0
+  size_objective: bpw_model  # must match the bpw_* in `objectives`
+
+  # -- NSGA-II operator controls ---------------------------------------------
+  # pymoo gives each operator TWO probabilities. `prob` is the chance the
+  # operator fires on an individual (or mating pair) at all; `prob_var` is the
+  # chance each gene is touched once it has. The familiar "1/n_var" rule refers
+  # to prob_var, and pymoo defaults it to min(0.5, 1/n_var). Putting 1/n_var
+  # into mutation_prob instead silently mutates a few percent of the population.
+  #
+  # mutation_prob is 1.0 in ALL NINE configs. The earlier sweeps used 0.9 in the
+  # global configs and 1.0 elsewhere, which made "k_grouping is the only line
+  # that differs" false for global. Pinned here so the claim holds.
+  #
+  # mutation_prob_var IS DELIBERATELY `auto`, resolving to min(0.5, 1/n_var):
+  # 0.333 at global, 0.067 at block, 0.019 at layer. Do not pin it to a
+  # constant. A fixed per-gene rate makes mutation disruption scale with
+  # dimensionality, and dimensionality is the axis this experiment varies:
+  #
+  #     n_var   prob_var=1.0            prob_var=1/n_var
+  #         3   3 genes, L2 step 0.086  0.9 genes, 0.033
+  #        15   15 genes,      0.217    1.1 genes, 0.037
+  #        52   52 genes,      0.423    1.1 genes, 0.038
+  #
+  # At 1.0 the layer cell takes a ~5x larger step than the global cell every
+  # generation, so a weak layer-wise front would be unattributable: granularity
+  # not helping and the operator being mis-tuned look identical. 1/n_var
+  # normalizes the step and gives every cell ~1 mutated gene per offspring,
+  # which with mutation_prob 1.0 is the standard regime.
+  #
+  # The argument for pinning it at 1.0 was that the default touches the lm_head
+  # gene -- 31% of bpw_model on its own -- on only ~2% of mutations. That is
+  # per-INDIVIDUAL reasoning and does not survive population scale: 100
+  # individuals x 0.019 x 500 generations is ~950 mutation events on that gene,
+  # before counting crossover.
+  crossover_prob: 0.9        # per mating pair
+  # 0.5 is pymoo's and Deb's canonical SBX rate: each gene is blended with
+  # probability 0.5, so half arrive intact from one parent and building blocks
+  # survive recombination. 1.0 blends every gene of every pair.
+  crossover_prob_var: 0.5    # per gene, given the pair crosses
+  crossover_eta: 15          # SBX spread; higher = children hug their parents
+  mutation_prob: 1.0         # per individual
+  mutation_prob_var: auto    # per gene; resolves to min(0.5, 1/n_var)
+  mutation_eta: 20           # PM spread; higher = smaller steps
+  eliminate_duplicates: true
+  n_offsprings: null         # null -> pop_size (generational)
+  ref_dir_partitions: null   # unsga3/moead only
+  moead_neighbors: 15
+  moead_prob_neighbor_mating: 0.7
+
+benchmark:
+  # EVALUATION PHASE ONLY -- the search never times anything. run_eval.py
+  # measures decode latency and peak GPU memory on the finished front under
+  # SqueezeLLM's protocol (benchmark() in their llama.py): tokens decoded ONE AT
+  # A TIME carrying past_key_values, CUDA-synced per step, the reported latency
+  # being the MEDIAN PER-TOKEN time -- what they print as "Median:". Peak memory
+  # is sampled as torch.cuda.memory_allocated() after each step and kept as a
+  # running max, which is their "max memory(MiB)"; the allocator's true
+  # high-water mark is reported alongside because their sample misses transient
+  # spikes by construction.
+  #
+  # No warm-up field: their loop has none, and the median over 128 steps
+  # discards the first few that pay for CUDA context setup. p10/p90 over the
+  # same steps give the noise band.
+  enabled: true
+  gen_tokens: 128            # single-token decode steps to time
+  batch_size: 1
+  every: 1                   # benchmark every front member
+
+  # READ THIS BEFORE QUOTING THE OUTPUT. run_eval.py emits two families of
+  # column:
+  #
+  #   measured_*    timed on the live model, and CONSTANT across the front,
+  #                 because compression here is simulated and every candidate
+  #                 runs the same dense fp16 graph. run_eval prints the spread
+  #                 against the fp16 p10-p90 noise band so a 2% wiggle is not
+  #                 mistaken for a speedup. Measured 7.87 ms/token on an RTX
+  #                 3060 with a 0.54 ms band.
+  #   *_projected   weight term from the bit accounting, runtime terms from the
+  #                 fp16 measurement. These vary per candidate and are what a
+  #                 results table should carry.
+  #
+  # Memory is reported in BYTES (bytes_deployable, measured_peak_alloc_bytes)
+  # as well as MB. peak_mb_projected is a LOWER bound -- no dequant scratch
+  # buffer, no allocator fragmentation. latency_ms_projected is an UPPER bound
+  # on the speedup -- a perfectly weight-bandwidth-bound kernel, nothing charged
+  # for dequantization, LUT gathers or irregular sparse access.
+
+log:
+  root: logs
+  run_name: gpt2-scope-block-all-uq-np100-ng500
+  checkpoint_every: 10
+  save_history: true
+
+plot:
+  enabled: true
+  # 5, not 1. At n_gen 500 a per-generation frame would write 1,000 files and a
+  # 167-second video; every 5 gives ~100 frames, matching the earlier runs.
+  every: 5
+  formats: [png, pdf]
+  dpi: 150
+  style: paper
+  yscale: log
+  # Absolute floor. Perplexity is exp(cross-entropy) and cross-entropy is
+  # non-negative, so 1.0 is the theoretical minimum. Overrides ylim_min_ratio,
+  # is not padded, and refit never moves it.
+  ylim_min: 1.0
+  ylim_min_ratio: 0.8        # unused while ylim_min is set
+  ylim_pad: 0.03
+  # null = no cap: the box opens to the highest reference point and
+  # refit_at_end raises it to cover every candidate, so nothing is off-scale.
+  ylim_max: null
+  ylim_max_ratio: null
+  legend_alpha: 0.3
+  marker_pt: 3.5
+  baseline_label: exponential search (baseline)
+  annotation_pt: null
+  venue: ieee
+  width: column
+  video: [mp4, gif]
+  video_fps: 6
