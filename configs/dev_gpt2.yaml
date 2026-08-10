@@ -28,7 +28,7 @@ data:
   eval_dataset: wikitext2
   seqlen: 1024               # GPT-2's context window
   n_proxy_seq: 8
-  n_eval_seq: 64
+  n_eval_seq: 128
 
 search:
   algorithm: nsga2

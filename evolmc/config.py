@@ -165,7 +165,7 @@ class DataConfig:
     eval_dataset: str = "wikitext2"
     seqlen: int = 2048
     # Sequences used for the *proxy* fitness inside the EA loop.
-    n_proxy_seq: int = 16
+    n_proxy_seq: int = 8
     # Sequences used for the full evaluation of the final Pareto front.
     n_eval_seq: int = 128
     seed: int = 0

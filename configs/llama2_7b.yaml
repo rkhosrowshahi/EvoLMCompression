@@ -3,10 +3,10 @@
 # RTX 3060: set master_device: cpu and expect a large slowdown; this tier is
 # really an H100 job.
 #
-# Budget: 40 x 40 = 1600 evaluations. At ~16 proxy windows that is roughly
-# 4-6 s per evaluation on an H100, i.e. 2-3 hours. Raising n_proxy_seq to 128
+# Budget: 40 x 40 = 1600 evaluations. At 8 proxy windows that is roughly
+# a few seconds per evaluation on an H100. Raising n_proxy_seq to 128
 # would make the same run take a day -- validate the proxy with
-# evaluate.rank_correlation instead of paying that.
+# evaluate.rank_correlation instead of paying that. Eval stays at 128.
 
 model:
   name: meta-llama/Llama-2-7b-hf
@@ -41,7 +41,7 @@ data:
   calib_dataset: c4
   eval_dataset: wikitext2
   seqlen: 2048
-  n_proxy_seq: 16
+  n_proxy_seq: 8
   n_eval_seq: 128
 
 search:

@@ -72,7 +72,7 @@ data:
   eval_dataset: wikitext2
   seqlen: 1024               # GPT-2's context window
   n_proxy_seq: 8             # fitness signal during the search
-  n_eval_seq: 64             # full evaluation of the final front
+  n_eval_seq: 128             # full evaluation of the final front
 
 search:
   algorithm: nsga2

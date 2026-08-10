@@ -128,15 +128,11 @@
 # design, and the whole point of this experiment is to attribute differences to
 # the target set.
 #
-# 128 windows x 1024 tokens = 131,072 calibration tokens from C4, against the 8
-# windows the earlier sweeps used. The proxy forward pass therefore costs 16x
-# what it did and is no longer negligible next to `apply`, which was ~78% of an
-# evaluation at 8 windows. It is also the entire budget: the cost accounting is
-# microseconds and only perplexity needs the GPU. Time one run before committing
-# to all nine.
-#
-# n_eval_seq stays at 64 (wikitext2), matching every finished run in this
-# directory, so the final evaluation of the front is comparable to them.
+# Search keeps n_proxy_seq at 8 so each generation stays apply-bound (~20 s at
+# pop 100), matching the earlier gpt2_k sweeps. Final front evaluation uses
+# n_eval_seq 128 (GPTQ/SqueezeLLM-style WikiText-2 sample count), not the 64
+# used in finished runs in this directory -- trade a bit of continuity for a
+# protocol match to the tables we cite.
 
 model:
   name: gpt2
@@ -220,8 +216,8 @@ data:
   # embedding, so a longer window raises an index error on the first forward
   # pass rather than degrading gracefully.
   seqlen: 1024
-  n_proxy_seq: 128           # calibration windows behind the fitness signal
-  n_eval_seq: 64             # full evaluation of the final front
+  n_proxy_seq: 8             # search fitness signal (cheap; matches gpt2_k)
+  n_eval_seq: 128            # final front eval (GPTQ/SqueezeLLM-style)
 
 search:
   algorithm: nsga2

@@ -632,7 +632,9 @@ def test_scope_configs_form_the_full_grid():
         # Everything else is a constant of the experiment.
         assert cfg.quant.binning == "uniform", p
         assert cfg.search.n_gen * cfg.search.pop_size == 50_000, p
-        assert cfg.data.seqlen == 1024 and cfg.data.n_proxy_seq == 128, p
+        assert cfg.data.seqlen == 1024, p
+        assert cfg.data.n_proxy_seq == 8, p
+        assert cfg.data.n_eval_seq == 128, p
         assert cfg.search.objectives == ("ppl_proxy", "bpw_model"), p
         # Latency and memory are measured after the search, not optimized.
         assert cfg.benchmark.enabled, p
