@@ -132,8 +132,7 @@ def main():
         b = cfg.benchmark
         print(f"benchmark protocol : {b.gen_tokens} single-token decode steps, "
               f"batch {b.batch_size}, past_key_values carried, CUDA-synced per "
-              f"step
-                     (SqueezeLLM llama.py benchmark(); "
+              f"step (SqueezeLLM llama.py benchmark(); "
               f"latency is the MEDIAN PER-TOKEN time)")
         ref = bench.measure(comp.model, comp.tokenizer, b, device=comp.device)
         if ref is None:
