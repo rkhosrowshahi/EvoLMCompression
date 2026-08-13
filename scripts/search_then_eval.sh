@@ -8,7 +8,7 @@
 # collision (e.g. a stale prior run already sitting under that name), and
 # this script does not re-detect that; it assumes a clean first run.
 #
-#   scripts/_search_then_eval.sh <config.yaml> [run_search.py flags...]
+#   scripts/search_then_eval.sh <config.yaml> [run_search.py flags...]
 
 set -euo pipefail
 cd "$(dirname "$0")/.."

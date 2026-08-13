@@ -17,5 +17,5 @@ CONFIGS=(
 )
 
 for cfg in "${CONFIGS[@]}"; do
-  scripts/_search_then_eval.sh "$cfg" "$@"
+  scripts/search_then_eval.sh "$cfg" "$@"
 done
