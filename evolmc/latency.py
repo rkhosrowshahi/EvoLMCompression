@@ -216,7 +216,7 @@ class LatencyProxy:
         bound of 0.459 even at zero sparsity, because the bitmap mask alone puts
         a floor of 1 bit per POSITION on the bytes while FLOPs scale with
         survivors. So compute never binds and latency_proxy is redundant with
-        bpw_model, which a real 4-generation run confirmed at 0.00% discordant
+        avg_bits, which a real 4-generation run confirmed at 0.00% discordant
         pairs over 1,128 comparisons.
         """
         bound = 0

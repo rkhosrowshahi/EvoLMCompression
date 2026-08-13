@@ -5,3 +5,4 @@ logs/
 *.egg-info/
 .pytest_cache/
 presentation/
+archive/

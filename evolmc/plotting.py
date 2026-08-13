@@ -7,7 +7,7 @@ through ffmpeg -- shows the front actually moving rather than the axes
 rescaling under it. Points outside the box are clipped and counted in a corner
 annotation, never silently dropped.
 
-The x range is derived analytically from `quant.k_choices` (the reachable bpw
+The x range is derived analytically from `quant.k_choices` (the reachable avg_bits
 interval is known before a single evaluation runs), so it never depends on what
 the search happened to sample.
 
@@ -203,17 +203,18 @@ def latex_snippet(cfg, path, caption="Pareto front.", label="fig:pareto"):
 def derive_limits(compressor, cfg, baselines=None, fp16_ppl=None):
     """Fixed (xlim, ylim) for every frame in the run.
 
-    x comes from the reachable bpw interval, computed in closed form from
+    x comes from the reachable avg_bits interval, computed in closed form from
     `k_choices`. y comes from the reference points if we have them, so the
     box is anchored to fp16 and to the uniform-K line the search must beat.
     """
     genome = compressor.genome
-    bpws = []
+    avg_bits_vals = []
     for k in (min(genome.k_choices), max(genome.k_choices)):
         cost = compressor.cost_only(genome.encode_uniform(k))
-        bpws.append(cost.bpw_target if cfg.search.size_objective == "bpw_target"
-                    else cost.bpw_model)
-    lo, hi = min(bpws), max(bpws)
+        avg_bits_vals.append(cost.avg_bits_archival
+                   if cfg.search.size_objective == "avg_bits_archival"
+                   else cost.avg_bits)
+    lo, hi = min(avg_bits_vals), max(avg_bits_vals)
     pad = 0.05 * (hi - lo) if hi > lo else 0.5
     xlim = (cfg.plot.xlim_min if cfg.plot.xlim_min is not None else lo - pad,
             cfg.plot.xlim_max if cfg.plot.xlim_max is not None else hi + pad)
@@ -297,7 +298,7 @@ class ParetoPlotter:
     on y, objective 1 on x, objective 2 as the point color, on a frozen scale
     so frames stay comparable. The front is then drawn as a scatter rather than
     a connected curve, because a 3-objective front is a surface and joining its
-    members in bpw order would draw a line through points that do not lie on
+    members in avg_bits order would draw a line through points that do not lie on
     one. Objectives past the third are optimized but not drawn.
     """
 
@@ -315,7 +316,7 @@ class ParetoPlotter:
         if self.cspec is not None and bounds is not None:
             ideal, nadir = bounds[2]
             self.clim = (min(ideal, nadir), max(ideal, nadir))
-        # baselines: list of (bpw, ppl, K) for the uniform-K reference line
+        # baselines: list of (avg_bits, ppl, K) for the uniform-K reference line
         self.baselines = sorted(baselines or [], key=lambda r: r[0])
         self.theme = THEMES[self.cfg.style]
         apply_style(cfg, log=getattr(run, "log", None))
@@ -333,7 +334,7 @@ class ParetoPlotter:
         # readable on inspection without competing with the axis labels.
         self.annot_pt = (cfg.plot.annotation_pt if cfg.plot.annotation_pt
                          else max(self.base_pt - 3.0, 3.5))
-        # Which measure this is (bpw_target vs bpw_model) is set by
+        # Which measure this is (avg_bits vs avg_bits_archival) is set by
         # search.size_objective and recorded in the run's config. With an
         # explicit objective list the scope is named on the axis instead: f2
         # and f3 can cover different weight sets, so a reader who assumes one
@@ -452,10 +453,10 @@ class ParetoPlotter:
         # ones, since the curve itself already shows the points are there.
         min_gap = 0.075
         last_frac = -1.0
-        for bpw, ppl, k in self.baselines:
-            if not self._inside(bpw, ppl):
+        for avg_bits, ppl, k in self.baselines:
+            if not self._inside(avg_bits, ppl):
                 continue
-            frac = (bpw - self.xlim[0]) / max(span, 1e-9)
+            frac = (avg_bits - self.xlim[0]) / max(span, 1e-9)
             if frac - last_frac < min_gap:
                 continue
             last_frac = frac
@@ -464,7 +465,7 @@ class ParetoPlotter:
                 ha, dx = "right", 4
             elif frac < 0.1:
                 ha, dx = "left", -4
-            ax.annotate(f"$K$={k}", xy=(bpw, ppl), xytext=(dx, 6),
+            ax.annotate(f"$K$={k}", xy=(avg_bits, ppl), xytext=(dx, 6),
                         textcoords="offset points", ha=ha, va="bottom",
                         fontsize=self.annot_pt, color=t["ink_2"], zorder=6)
 
@@ -708,7 +709,7 @@ def _nz(x, eps=1e-12):
 
 
 def hv_indicator(xlim, ylim, yscale="log"):
-    """Two-objective hypervolume, in the original (ppl, bpw) column order.
+    """Two-objective hypervolume, in the original (ppl, avg_bits) column order.
 
     Thin wrapper over `hv_indicator_nd` kept because the comparison script and
     every stored 2-objective run speak this signature. Both objectives are
@@ -717,7 +718,7 @@ def hv_indicator(xlim, ylim, yscale="log"):
     """
     hv = hv_indicator_nd([(ylim[0], ylim[1]), (xlim[0], xlim[1])],
                          logs=[yscale == "log", False],
-                         names=("ppl_proxy", "bpw"))
+                         names=("ppl_proxy", "avg_bits"))
     hv.xlim, hv.ylim, hv.yscale = tuple(xlim), tuple(ylim), yscale
     return hv
 
@@ -725,7 +726,7 @@ def hv_indicator(xlim, ylim, yscale="log"):
 def derive_bounds(compressor, cfg, objset, baseline_rows=None, fp16_ppl=None):
     """A frozen (ideal, nadir) box for every objective in `objset`.
 
-    Perplexity and the bpw axis reuse `derive_limits`, so the explicit
+    Perplexity and the avg_bits axis reuse `derive_limits`, so the explicit
     `plot.xlim_*` / `plot.ylim_*` controls keep working exactly as before and
     the figure box and the HV box stay the same box.
 
@@ -906,7 +907,7 @@ def plot_front_on_corpus(stem, cfg, front, baseline=None, fp16=None,
     return _finish(fig, ax, cfg, t, pt, stem, title=title)
 
 
-def plot_calib_vs_eval(stem, cfg, bpw, ppl_calib, ppl_eval,
+def plot_calib_vs_eval(stem, cfg, avg_bits, ppl_calib, ppl_eval,
                        fp16_calib=None, fp16_eval=None,
                        calib_name="calibration", eval_name="held-out",
                        title=None):
@@ -918,8 +919,8 @@ def plot_calib_vs_eval(stem, cfg, bpw, ppl_calib, ppl_eval,
     drawn on the corpus the search optimized.
     """
     fig, ax, t, pt = _new_axes(cfg)
-    order = np.argsort(np.asarray(bpw, dtype=float))
-    x = np.asarray(bpw, dtype=float)[order]
+    order = np.argsort(np.asarray(avg_bits, dtype=float))
+    x = np.asarray(avg_bits, dtype=float)[order]
 
     ax.plot(x, np.asarray(ppl_calib, dtype=float)[order], lw=1.4,
             color=t["front"], marker="o", ms=cfg.plot.marker_pt,

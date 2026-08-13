@@ -28,11 +28,11 @@ Run a real search, then evaluate the resulting front against the fixed-bit
 baselines:
 
 ```bash
-python scripts/run_search.py configs/dev_gpt2.yaml
+python scripts/run_search.py configs/uq_pruning/gpt2_124m/gpt2_124m-type_quant-global_prune_sigma-bitmap-2obj.yaml
 ```
 
 ```bash
-python scripts/run_eval.py configs/dev_gpt2.yaml latest
+python scripts/run_eval.py configs/uq_pruning/gpt2_124m/gpt2_124m-type_quant-global_prune_sigma-bitmap-2obj.yaml latest
 ```
 
 ### Which corpus the figures show
@@ -103,7 +103,7 @@ a run with `tail -f`:
 ```json
 {"eval": 16, "t": 3.48, "eval_seconds": 0.537, "apply_seconds": 0.366,
  "ppl_proxy": 8554355.8, "x": [0.1, 0.1, 0.1, 0.0, 0.0],
- "bpw_target": 2.0625, "bpw_target_archival": 1.70962, "bpw_model": 6.48715,
+ "avg_bits": 2.0625, "avg_bits_archival": 1.70962, "avg_bits": 6.48715,
  "cr_deploy": 2.46641, "cr_archive": 2.56152, "sparsity": 0.0, ...}
 ```
 
@@ -111,7 +111,7 @@ The full genome `x` is stored on every line, so any evaluation from any run can
 be replayed exactly.
 
 `logs/generations.jsonl` — one record per generation: front size, best
-perplexity, bpw range, hypervolume, wall-clock, and the front itself.
+perplexity, avg_bits range, hypervolume, wall-clock, and the front itself.
 `data/history.npz` holds the raw `X` and `F` arrays for every generation if you
 want to re-plot or re-analyze offline.
 
@@ -125,7 +125,7 @@ run.** That is the point: every frame is drawn in the same box, so flipping
 through `figures/pareto/` shows the front moving rather than the axes rescaling
 under it.
 
-- **x limits** come from `quant.k_choices` in closed form — the reachable bpw
+- **x limits** come from `quant.k_choices` in closed form — the reachable avg_bits
   interval is known before a single evaluation runs, so the box never depends
   on what the search happened to sample.
 - **y limits**: the ceiling is **uncapped by default** (`plot.ylim_max_ratio:
@@ -262,12 +262,12 @@ Checkpoints are written every `log.checkpoint_every` generations. A 7B run that
 dies at generation 31 of 40 resumes with:
 
 ```bash
-python scripts/run_search.py configs/llama2_7b.yaml --resume logs/latest
+python scripts/run_search.py configs/uq_pruning/llama2_7b/llama2_7b.yaml --resume logs/latest
 ```
 
 ## Experiments
 
-### GPT-2 codebook-size sweep (`configs/gpt2_k_*.yaml`)
+### GPT-2 codebook-size sweep (`configs/uq*/gpt2_124m/gpt2_k_*.yaml`)
 
 Three configs that differ in **exactly one line** (`variables.k_grouping`), so
 any difference in the Pareto fronts is attributable to granularity alone.
@@ -275,9 +275,9 @@ Any integer K in [2, 8192], pruning off.
 
 | Config | Grouping | Variables | Search space |
 |---|---|---|---|
-| `gpt2_k_global.yaml` | `global` | 1 | 8191 |
-| `gpt2_k_block.yaml` | `block` | 12 | 8191^12 |
-| `gpt2_k_layer.yaml` | `block_type` | 48 | 8191^48 |
+| `gpt2_124m-global_quant-2obj.yaml` | `global` | 1 | 8191 |
+| `gpt2_124m-block_quant-2obj.yaml` | `block` | 12 | 8191^12 |
+| `gpt2_124m-layer_quant-2obj.yaml` | `block_type` | 48 | 8191^48 |
 
 ```bash
 bash scripts/gpt2_granularity.sh
@@ -318,7 +318,7 @@ the operators were exposed; `tests/test_pipeline.py` now pins it.
 Needs `pip install datasets` for the real corpora. Compare afterwards:
 
 ```bash
-python scripts/compare_runs.py gpt2-k-global gpt2-k-block gpt2-k-layer --bpw 2,3,4,6,8
+python scripts/compare_runs.py gpt2-k-global gpt2-k-block gpt2-k-layer --avg_bits 2,3,4,6,8
 ```
 
 Two choices baked into these configs that differ from the defaults:
@@ -326,8 +326,8 @@ Two choices baked into these configs that differ from the defaults:
 **`granularity: per_tensor`** — one codebook per layer. A K of 10^4 is only
 meaningful this way. GPT-2 rows hold 768 weights, so a per-channel codebook can
 never fill more than 768 entries, and storing 8192 fp16 centroids for a
-768-weight row costs **170 bpw of codebook alone**; per tensor the same
-codebook costs 0.06 bpw. This is also the original Deep Compression setup.
+768-weight row costs **170 avg_bits of codebook alone**; per tensor the same
+codebook costs 0.06 avg_bits. This is also the original Deep Compression setup.
 
 **`k_encoding: integer`** — the search picks any K in [2, 8192], not just
 powers of two, mapped **log-spaced** because the cost axis is index width
@@ -336,10 +336,10 @@ quality has plateaued, and leave almost no resolution at small K.
 
 Know what this buys at `per_tensor`. Index width is `ceil(log2 K)`, so every K
 inside a band costs identical indices and differs only in codebook size — and
-that band spans just **0.0004 bpw** here (measured on `h.6.mlp.c_fc`,
+that band spans just **0.0004 avg_bits** here (measured on `h.6.mlp.c_fc`,
 K ∈ [65, 128], where mse improves 74%). So the integer freedom is real but
 nearly free to ignore at this granularity. The regime where it genuinely pays
-is `per_channel`, where the same band spans **1.31 bpw**. `k_choices` no longer
+is `per_channel`, where the same band spans **1.31 avg_bits**. `k_choices` no longer
 bounds the search; it is now only the ladder of reference points, warm-start
 seeds, and plot-axis anchors.
 
@@ -379,9 +379,9 @@ distribution that the entropy coder then exploits. It is why nominal `K` buys
 | [models.py](evolmc/models.py) | Layer discovery, master weights, in-place restore |
 | [grouping.py](evolmc/grouping.py) | Genome encoding and the variable-count dial |
 | [quantize.py](evolmc/quantize.py) | Binning, codebooks, weight replacement |
-| [codec.py](evolmc/codec.py) | Huffman, entropy, bpw and CR accounting |
+| [codec.py](evolmc/codec.py) | Huffman, entropy, avg_bits and CR accounting |
 | [compressor.py](evolmc/compressor.py) | Applies a genome to the live model |
-| [problem.py](evolmc/problem.py) | The pymoo problem: `f1 = ppl`, `f2 = bpw` |
+| [problem.py](evolmc/problem.py) | The pymoo problem: `f1 = ppl`, `f2 = avg_bits` |
 | [search.py](evolmc/search.py) | NSGA-II / U-NSGA-III / MOEA/D drivers |
 | [rundir.py](evolmc/rundir.py) | Run directory layout and logging |
 | [plotting.py](evolmc/plotting.py) | Pareto frames with frozen axes, convergence |
@@ -394,10 +394,10 @@ distribution that the entropy coder then exploits. It is why nominal `K` buys
 reads, and the only number that supports a memory or latency claim.
 `cr_archive` uses Huffman-coded indices — a smaller checkpoint that must be
 decoded before use, valid only for storage/transmission claims. Both come out
-of every evaluation. Similarly `bpw_target` (compressed matrices only, what the
-GPTQ/AWQ tables quote) is reported next to `bpw_model` (whole checkpoint).
+of every evaluation. Similarly `avg_bits` (compressed matrices only, what the
+GPTQ/AWQ tables quote) is reported next to `avg_bits` (whole checkpoint).
 
-The gap is not cosmetic. On GPT-2 at 4 index bits, `bpw_target` is 4.25 but
+The gap is not cosmetic. On GPT-2 at 4 index bits, `avg_bits` is 4.25 but
 whole-model CR is only **2.0×**, because the embedding table is a third of the
 checkpoint and stays fp16. Any CR headline that omits this is inflated.
 
@@ -406,7 +406,7 @@ Group-wise (`g=128`) is correct for *affine* quantization, where each group
 stores two fp16 scalars. A per-group *codebook* stores `K` fp16 entries: for a
 single Llama-2 `down_proj` that is 4096·11008/128 codebooks, about **+2.0 bits
 per weight** — the codebook costs half again as much as the indices it serves.
-Per-channel costs +0.0625 bpw for the same `K=16`. `tests/test_pipeline.py`
+Per-channel costs +0.0625 avg_bits for the same `K=16`. `tests/test_pipeline.py`
 pins both numbers; run the group-wise setting once as an ablation and leave it
 off.
 

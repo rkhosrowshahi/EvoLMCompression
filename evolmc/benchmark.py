@@ -298,7 +298,7 @@ def project_latency_ms(size_mb_deployable: float, ref: RuntimeMeasurement) -> fl
     do not present it as a measured latency -- there is no kernel behind it.
 
     Note the projection is affine in deployable bytes and therefore a monotone
-    transform of `bpw_model`. That is precisely why latency is not one of the
+    transform of `avg_bits`. That is precisely why latency is not one of the
     search objectives: as an optimization axis it would add nothing that the
     memory axis does not already carry.
     """

@@ -158,7 +158,8 @@ def test_unknown_benchmark_option_is_rejected():
 
 def test_shipped_configs_carry_a_benchmark_block():
     import glob
-    paths = sorted(glob.glob("configs/gpt2_scope_*.yaml"))
+    paths = sorted(p for p in glob.glob("configs/uq*/gpt2_124m/gpt2_scope_*.yaml")
+                   if not p.endswith("_matched.yaml"))
     assert len(paths) == 18, "3 groupings x 3 target sets x 2 methods"
     for p in paths:
         cfg = Config.from_yaml(p)
@@ -257,8 +258,8 @@ def test_old_objective_names_still_resolve_with_a_warning():
     from evolmc.objectives import ObjectiveSet
 
     with pytest.warns(DeprecationWarning, match="cr_archival -> cr_archive"):
-        o = ObjectiveSet(("ppl_proxy", "bpw_target", "cr_archival"))
-    assert o.names == ("ppl_proxy", "bpw_target", "cr_archive")
+        o = ObjectiveSet(("ppl_proxy", "avg_bits", "cr_archival"))
+    assert o.names == ("ppl_proxy", "avg_bits", "cr_archive")
 
     with pytest.warns(DeprecationWarning, match="cr_deployable -> cr_deploy"):
         d = ObjectiveSet(("ppl_proxy", "cr_deployable"))
@@ -278,11 +279,11 @@ def test_from_box_reads_a_legacy_run():
     """objectives.from_box is the replot path for every finished run."""
     from evolmc.objectives import from_box
 
-    box = {"objectives": ["ppl_proxy", "bpw_target", "cr_archival"],
+    box = {"objectives": ["ppl_proxy", "avg_bits", "cr_archival"],
            "bounds": [[1.0, 1e5], [1.0, 16.0], [2.78, 1.0]]}
     with pytest.warns(DeprecationWarning):
         objset, bounds = from_box(box)
-    assert objset.names == ("ppl_proxy", "bpw_target", "cr_archive")
+    assert objset.names == ("ppl_proxy", "avg_bits", "cr_archive")
     assert bounds[2] == (2.78, 1.0)
 
 
@@ -290,8 +291,8 @@ def test_values_resolves_a_legacy_summary():
     """A summary read back from an old results.csv still scores."""
     from evolmc.objectives import ObjectiveSet
 
-    o = ObjectiveSet(("ppl_proxy", "bpw_target", "cr_archive"))
-    legacy = {"bpw_target": 4.0, "cr_archival": 2.5}
+    o = ObjectiveSet(("ppl_proxy", "avg_bits", "cr_archive"))
+    legacy = {"avg_bits": 4.0, "cr_archival": 2.5}
     assert o.values(30.0, legacy) == [30.0, 4.0, 2.5]
 
 
@@ -301,17 +302,17 @@ def test_canonicalize_row_prefers_the_current_name():
     both = canonicalize_row({"cr_archive": 3.0, "cr_archival": 99.0})
     assert both == {"cr_archive": 3.0}
     assert canonicalize_row({"cr_deployable": 2.0}) == {"cr_deploy": 2.0}
-    assert canonicalize_row({"bpw_model": 6.0}) == {"bpw_model": 6.0}
+    assert canonicalize_row({"avg_bits": 6.0}) == {"avg_bits": 6.0}
 
 
 def test_redundancy_still_catches_the_renamed_pair():
-    """cr_deploy is exactly 16/bpw_model, so pairing them adds nothing."""
+    """cr_deploy is exactly 16/avg_bits, so pairing them adds nothing."""
     from evolmc.objectives import ObjectiveSet, check_redundancy
 
     assert check_redundancy(ObjectiveSet(
-        ("ppl_proxy", "bpw_model", "cr_deploy")))
+        ("ppl_proxy", "avg_bits", "cr_deploy")))
     assert check_redundancy(ObjectiveSet(
-        ("ppl_proxy", "bpw_model", "cr_archive"))) == []
+        ("ppl_proxy", "avg_bits", "cr_archive"))) == []
 
 
 def test_shipped_configs_use_the_new_names():
@@ -319,17 +320,17 @@ def test_shipped_configs_use_the_new_names():
 
     from evolmc.config import Config
 
-    for p in sorted(glob.glob("configs/*.yaml")):
+    for p in sorted(glob.glob("configs/**/*.yaml", recursive=True)):
         raw = open(p, encoding="utf-8").read()
         assert "cr_archival" not in raw, p
         assert "cr_deployable" not in raw, p
-    for p in sorted(glob.glob("configs/gpt2_scope_*.yaml")):
+    for p in sorted(glob.glob("configs/uq*/gpt2_124m/gpt2_scope_*.yaml")):
         cfg = Config.from_yaml(p)
         # TWO objectives. Latency and memory are eval-phase measurements, not
         # search objectives -- compression here is simulated, so a stopwatch
         # cannot distinguish candidates.
-        assert cfg.search.objectives == ("ppl_proxy", "bpw_model"), p
-        assert cfg.search.size_objective == "bpw_model", p
+        assert cfg.search.objectives == ("ppl_proxy", "avg_bits"), p
+        assert cfg.search.size_objective == "avg_bits", p
         for m in ("cr_deploy", "cr_archive", "bytes_deployable"):
             assert m in cfg.search.report_metrics, p
             assert m not in cfg.search.objectives, p
@@ -616,7 +617,8 @@ def test_scope_configs_form_the_full_grid():
 
     from evolmc.config import Config
 
-    paths = sorted(glob.glob("configs/gpt2_scope_*.yaml"))
+    paths = sorted(p for p in glob.glob("configs/uq*/gpt2_124m/gpt2_scope_*.yaml")
+                   if not p.endswith("_matched.yaml"))
     assert len(paths) == 18
     grid = set()
     for p in paths:
@@ -635,13 +637,83 @@ def test_scope_configs_form_the_full_grid():
         assert cfg.data.seqlen == 1024, p
         assert cfg.data.n_proxy_seq == 8, p
         assert cfg.data.n_eval_seq == 128, p
-        assert cfg.search.objectives == ("ppl_proxy", "bpw_model"), p
+        assert cfg.search.objectives == ("ppl_proxy", "avg_bits"), p
         # Latency and memory are measured after the search, not optimized.
         assert cfg.benchmark.enabled, p
     assert len(grid) == 18, "duplicate cell in the grid"
     assert len({g for g, _, _, _ in grid}) == 3          # groupings
     assert len({(e, m) for _, e, m, _ in grid}) == 3     # target sets
     assert len({m for _, _, _, m in grid}) == 2          # methods
+
+
+def test_matched_prune_grouping_configs_pair_with_a_global_sibling():
+    """Every config with prune_grouping matching a non-global k_grouping has
+    a sibling in the same directory that is identical except prune_grouping
+    is global, and costs strictly more variables than that sibling -- the
+    whole point of matching grouping is trading a clean single-variable
+    ablation for a wider pruning search.
+
+    Matched by config CONTENT, not filename: the scope family still marks
+    this variant with a `_matched.yaml` suffix, while the k-sweep/companding
+    family encodes prune_grouping directly in the filename tokens instead
+    (gpt2_124m-{k_grouping}_quant-{prune_grouping}_prune_sigma-bitmap-Nobj.yaml), so a
+    filename-pattern check would only ever catch one of the two schemes.
+    """
+    import glob
+    from pathlib import Path
+
+    from evolmc.config import Config
+    from evolmc.grouping import Genome
+    from evolmc.models import TargetLayer
+
+    layers = [
+        TargetLayer(f"transformer.h.{b}.{n}", torch.nn.Linear(4, 4),
+                   4096 * 4096, 4096, 4096, b, n, False)
+        for b in range(12)
+        for n in ("attn.c_attn", "attn.c_proj", "mlp.c_fc", "mlp.c_proj")
+    ]
+
+    def fingerprint(cfg):
+        """Everything a matched config and its global sibling must share."""
+        return (cfg.model.name, cfg.quant.binning, cfg.variables.k_grouping,
+                tuple(cfg.search.objectives), cfg.quant.deployable_format,
+                tuple(cfg.model.exclude_patterns), cfg.model.include_embeddings)
+
+    all_paths = sorted(glob.glob("configs/**/*.yaml", recursive=True))
+    loaded = [(p, Config.from_yaml(p)) for p in all_paths]
+
+    # gpt2 only: llama2_7b.yaml/pythia_410m.yaml also have prune_grouping ==
+    # k_grouping (both "type"), but each is the ONLY config for its model, by
+    # original design rather than as one half of a deliberately paired
+    # ablation -- there is no "global-prune" sibling to find for either.
+    matched = [(p, c) for p, c in loaded
+              if c.model.name == "gpt2" and c.prune.enabled
+              and c.variables.k_grouping != "global"
+              and c.variables.prune_grouping == c.variables.k_grouping]
+    assert len(matched) == 17, "the matched-grouping variant sweep"
+
+    for p, cfg in matched:
+        # Stay within the same family (scope vs k-sweep/companding): the two
+        # now share a fingerprint by coincidence (both use the same default
+        # objectives since the avg_bits_target/avg_bits_model split was
+        # removed), but they are structurally separate families, each with
+        # its own pairing convention -- the scope family is additionally
+        # covered by the scope-specific tests above.
+        p_is_scope = "gpt2_scope_" in Path(p).name
+        siblings = [
+            (sp, sc) for sp, sc in loaded
+            if sp != p and Path(sp).parent == Path(p).parent
+            and ("gpt2_scope_" in Path(sp).name) == p_is_scope
+            and sc.prune.enabled and sc.variables.prune_grouping == "global"
+            and fingerprint(sc) == fingerprint(cfg)
+        ]
+        assert len(siblings) == 1, (p, [sp for sp, _ in siblings])
+        sibling_cfg = siblings[0][1]
+
+        g_matched = Genome(layers, cfg.quant, cfg.prune, cfg.variables)
+        g_sibling = Genome(layers, sibling_cfg.quant, sibling_cfg.prune,
+                           sibling_cfg.variables)
+        assert g_matched.n_var > g_sibling.n_var, p
 
 
 def test_scope_file_names_state_target_set_and_method():
@@ -651,7 +723,8 @@ def test_scope_file_names_state_target_set_and_method():
     import re
 
     names = {p.replace("\\", "/").split("/")[-1]
-             for p in glob.glob("configs/gpt2_scope_*.yaml")}
+             for p in glob.glob("configs/uq*/gpt2_124m/gpt2_scope_*.yaml")
+             if not p.endswith("_matched.yaml")}
     pat = re.compile(
         r"^gpt2_scope_(global|block|layer)_(no_head|with_head|all)"
         r"_(uq|uq_pruning)\.yaml$")
@@ -694,7 +767,7 @@ def test_scope_configs_leave_mutation_rate_to_n_var():
 
     from evolmc.config import Config
 
-    for p in sorted(glob.glob("configs/gpt2_scope_*.yaml")):
+    for p in sorted(glob.glob("configs/uq*/gpt2_124m/gpt2_scope_*.yaml")):
         cfg = Config.from_yaml(p)
         assert cfg.search.mutation_prob_var is None, p
         assert cfg.search.crossover_prob_var == 0.5, p   # canonical SBX

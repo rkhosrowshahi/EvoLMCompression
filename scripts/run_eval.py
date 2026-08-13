@@ -12,8 +12,8 @@ windows. The gap between the two curves is the honest statement of how much of
 the front survives, and the Spearman correlation says whether the cheap proxy
 ranked candidates the way the full metric does at all.
 
-    python scripts/run_eval.py configs/gpt2_k_layer.yaml logs/gpt2-k-layer
-    python scripts/run_eval.py configs/gpt2_k_layer.yaml logs/gpt2-k-layer --skip-baselines
+    python scripts/run_eval.py configs/uq/gpt2_124m/gpt2_124m-layer_quant-2obj.yaml logs/gpt2_124m-layer_quant-2obj-np100-ng100
+    python scripts/run_eval.py configs/uq/gpt2_124m/gpt2_124m-layer_quant-2obj.yaml logs/gpt2_124m-layer_quant-2obj-np100-ng100 --skip-baselines
 """
 
 from __future__ import annotations
@@ -42,7 +42,7 @@ from evolmc.rundir import find_run  # noqa: E402
 # from ModelCost.summary() as it comes, rather than from an allowlist: a fixed
 # list silently drops any field added to the accounting later, which is exactly
 # what happened to param_reduction, n_alive_total, cr_dense, size_mb_dense and
-# bpw_model_archival -- the columns that make pruning visible.
+# avg_bits_archival -- the columns that make pruning visible.
 LEAD = ["tag", "ppl_eval", "ppl_calib"]
 
 
@@ -163,8 +163,7 @@ def main():
     # nothing is pruned, and every ratio is 1.
     rows.append({"tag": "fp16",
                  "ppl_eval": round(fp16_eval, 4), "ppl_calib": round(fp16_calib, 4),
-                 "bpw_target": 16.0, "bpw_target_archival": 16.0,
-                 "bpw_model": 16.0, "bpw_model_archival": 16.0,
+                 "avg_bits": 16.0, "avg_bits_archival": 16.0,
                  "cr_deploy": 1.0, "cr_archive": 1.0, "cr_dense": 1.0,
                  "sparsity": 0.0, "param_reduction": 0.0,
                  "n_alive_total": float(comp.master.n_target_weights
@@ -188,9 +187,9 @@ def main():
                                 do_measure=ref is not None
                                 and i % max(cfg.benchmark.every, 1) == 0)
             rows.append(r)
-            baselines.append((r["bpw_target"], r["ppl_eval"]))
+            baselines.append((r["avg_bits"], r["ppl_eval"]))
             print(f"{r['tag']:<22}{r['ppl_eval']:>12.3f}{r['ppl_calib']:>12.3f}"
-                  f"   bpw {r['bpw_target']:5.2f}  CR {r['cr_deploy']:5.2f}x")
+                  f"   avg_bits {r['avg_bits']:5.2f}  CR {r['cr_deploy']:5.2f}x")
 
     front = []
     if front_path and os.path.exists(front_path):
@@ -204,7 +203,7 @@ def main():
             rows.append(r)
             front.append(r)
             line = (f"{r['tag']:<22}{r['ppl_eval']:>12.3f}{r['ppl_calib']:>12.3f}"
-                    f"   bpw {r['bpw_target']:5.2f}  CR {r['cr_deploy']:5.2f}x"
+                    f"   avg_bits {r['avg_bits']:5.2f}  CR {r['cr_deploy']:5.2f}x"
                     f"  (archive {r['cr_archive']:.2f}x)")
             if ref is not None:
                 line += (f"  ->{r['peak_mb_projected']:8.0f} MB"
@@ -242,7 +241,7 @@ def main():
     # -- does the proxy rank candidates the way the full metric does? --------
     calib = [r["ppl_calib"] for r in front]
     evald = [r["ppl_eval"] for r in front]
-    bpw = [r["bpw_target"] for r in front]
+    avg_bits = [r["avg_bits"] for r in front]
     rho = rank_correlation(calib, evald)
 
     gap = [e / c for e, c in zip(evald, calib) if c > 0]
@@ -265,11 +264,11 @@ def main():
     written = []
     written += plot_front_on_corpus(
         os.path.join(fig_dir, "front_eval"), cfg,
-        front=list(zip(bpw, evald)), baseline=baselines or None,
+        front=list(zip(avg_bits, evald)), baseline=baselines or None,
         fp16=fp16_eval, corpus=f"{eval_name} (held-out)")
     written += plot_calib_vs_eval(
         os.path.join(fig_dir, "front_calib_vs_eval"), cfg,
-        bpw=bpw, ppl_calib=calib, ppl_eval=evald,
+        avg_bits=avg_bits, ppl_calib=calib, ppl_eval=evald,
         fp16_calib=fp16_calib, fp16_eval=fp16_eval,
         calib_name=calib_name, eval_name=eval_name)
     written += plot_proxy_correlation(

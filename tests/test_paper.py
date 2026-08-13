@@ -320,7 +320,7 @@ def test_off_axes_counts_both_axes_and_non_finite(tmp_path):
         [50.0, 4.0],            # inside
         [5000.0, 4.0],          # perplexity above the ceiling
         [1.0, 4.0],             # perplexity below the floor
-        [50.0, 99.0],           # bpw off the right edge
+        [50.0, 99.0],           # avg_bits off the right edge
         [float("inf"), 4.0],    # a candidate that broke the model
     ])
     assert _off_count(plotter, pop, pop[:1]) == 4
@@ -424,15 +424,15 @@ def test_evaluation_figures_render_and_size_correctly(tmp_path):
                                  plot_proxy_correlation)
 
     cfg = _cfg("ieee", "column")
-    bpw = [2.0, 4.0, 6.0, 8.0]
+    avg_bits = [2.0, 4.0, 6.0, 8.0]
     calib = [900.0, 120.0, 40.0, 29.0]
     evald = [1500.0, 180.0, 52.0, 31.0]
 
     a = plot_front_on_corpus(str(tmp_path / "front_eval"), cfg,
-                             front=list(zip(bpw, evald)),
-                             baseline=list(zip(bpw, [w * 1.4 for w in evald])),
+                             front=list(zip(avg_bits, evald)),
+                             baseline=list(zip(avg_bits, [w * 1.4 for w in evald])),
                              fp16=27.5, corpus="wikitext2 (held-out)")
-    b = plot_calib_vs_eval(str(tmp_path / "both"), cfg, bpw, calib, evald,
+    b = plot_calib_vs_eval(str(tmp_path / "both"), cfg, avg_bits, calib, evald,
                            fp16_calib=25.0, fp16_eval=27.5)
     c = plot_proxy_correlation(str(tmp_path / "corr"), cfg, calib, evald,
                                rho=0.987)
@@ -472,7 +472,7 @@ def test_uncapped_headroom_puts_every_reference_inside_the_box():
     from evolmc.plotting import derive_limits
 
     class FakeCost:
-        def __init__(self, b): self.bpw_target = self.bpw_model = b
+        def __init__(self, b): self.avg_bits = b
 
     class FakeGenome:
         k_choices = (2, 8192)
@@ -545,7 +545,7 @@ def test_baseline_tags_do_not_overprint_each_other(tmp_path):
     F = np.array([[1e6, 2.0], [30.0, 8.0]])
     plotter.frame(1, F, F, 10, 0.5)
 
-    # Spaced 0.5 bpw apart in a 13.3-wide box = 0.038 of the axis, below the
+    # Spaced 0.5 avg_bits apart in a 13.3-wide box = 0.038 of the axis, below the
     # 0.075 minimum gap, so roughly every other one survives.
     assert 0 < len(captured["tags"]) < len(crowded)
 
@@ -593,7 +593,7 @@ def test_padding_keeps_extreme_references_off_the_spines():
     from evolmc.plotting import derive_limits
 
     class FakeCost:
-        def __init__(self, b): self.bpw_target = self.bpw_model = b
+        def __init__(self, b): self.avg_bits = b
 
     class FakeGenome:
         k_choices = (2, 8192)
@@ -645,7 +645,7 @@ def test_absolute_ylim_min_overrides_the_ratio_and_is_not_padded():
     from evolmc.plotting import derive_limits
 
     class FakeCost:
-        def __init__(self, b): self.bpw_target = self.bpw_model = b
+        def __init__(self, b): self.avg_bits = b
 
     class FakeGenome:
         k_choices = (2, 8192)
@@ -694,7 +694,7 @@ def test_default_config_leaves_no_reference_off_scale():
     from evolmc.plotting import derive_limits
 
     class FakeCost:
-        def __init__(self, b): self.bpw_target = self.bpw_model = b
+        def __init__(self, b): self.avg_bits = b
 
     class FakeGenome:
         k_choices = (2, 8192)
@@ -726,7 +726,7 @@ def test_absolute_ceiling_overrides_the_ratio_and_is_not_padded():
     from evolmc.plotting import derive_limits
 
     class FakeCost:
-        def __init__(self, b): self.bpw_target = self.bpw_model = b
+        def __init__(self, b): self.avg_bits = b
 
     class FakeGenome:
         k_choices = (2, 8192)
@@ -794,7 +794,7 @@ def test_x_bounds_override_the_derived_range():
     from evolmc.plotting import derive_limits
 
     class FakeCost:
-        def __init__(self, b): self.bpw_target = self.bpw_model = b
+        def __init__(self, b): self.avg_bits = b
 
     class FakeGenome:
         k_choices = (2, 8192)
@@ -819,7 +819,7 @@ def test_x_bounds_override_the_derived_range():
 
 # -- the hypervolume reference printout ------------------------------------
 
-def _hv_log(objectives=("ppl_proxy", "bpw_target"), **plot):
+def _hv_log(objectives=("ppl_proxy", "avg_bits"), **plot):
     """Run _log_hv_reference and return the lines it emitted."""
     from evolmc.objectives import ObjectiveSet
     from evolmc.plotting import hv_indicator, hv_indicator_nd
@@ -874,10 +874,10 @@ def test_hv_reference_names_the_origin_that_actually_applied():
 def test_hv_reference_reports_every_objective_and_its_direction():
     """A third objective the log never mentions is a third objective nobody
     can check. Each line must also say which way the objective runs."""
-    out = _hv_log(objectives=("ppl_proxy", "bpw_target", "cr_archive"))
+    out = _hv_log(objectives=("ppl_proxy", "avg_bits", "cr_archive"))
     assert "objective 3  cr_archive" in out
     assert "MAX" in out                    # cr_* is maximized
-    assert out.count("min") >= 2           # ppl and bpw are not
+    assert out.count("min") >= 2           # ppl and avg_bits are not
     # The normalized corners must have one coordinate per objective.
     assert "(1.0, 1.0, 1.0) normalized" in out
     assert "(0.0, 0.0, 0.0) normalized" in out
@@ -888,7 +888,7 @@ def test_hv_reference_reports_every_objective_and_its_direction():
 def test_cr_objectives_are_maximized_and_round_trip():
     from evolmc.objectives import ObjectiveSet
 
-    o = ObjectiveSet(("ppl_proxy", "bpw_target", "cr_archive"))
+    o = ObjectiveSet(("ppl_proxy", "avg_bits", "cr_archive"))
     assert o.n_obj == 3
     values = [42.0, 4.0, 2.5]
     F = o.to_min(values)
@@ -904,9 +904,9 @@ def test_objective_set_rejects_typos_and_duplicates():
     from evolmc.objectives import ObjectiveSet
 
     with pytest.raises(ValueError, match="unknown objective"):
-        ObjectiveSet(("ppl_proxy", "bpw_targt"))
+        ObjectiveSet(("ppl_proxy", "avg_bits_targt"))
     with pytest.raises(ValueError, match="repeats"):
-        ObjectiveSet(("ppl_proxy", "bpw_target", "bpw_target"))
+        ObjectiveSet(("ppl_proxy", "avg_bits", "avg_bits"))
     with pytest.raises(ValueError, match="at least 2"):
         ObjectiveSet(("ppl_proxy",))
 
@@ -914,33 +914,35 @@ def test_objective_set_rejects_typos_and_duplicates():
 def test_redundant_objective_pairs_are_flagged():
     """The trap this whole mechanism exists to catch.
 
-    cr_deploy is exactly 16/bpw_model -- both normalize the same
+    cr_deploy is exactly 16/avg_bits -- both normalize the same
     target_bits_deployable -- so pairing them leaves dominance untouched and
     burns a full search budget reproducing the 2-objective front.
     """
     from evolmc.objectives import ObjectiveSet, check_redundancy
 
     bad = check_redundancy(ObjectiveSet(
-        ("ppl_proxy", "bpw_model", "cr_deploy")))
+        ("ppl_proxy", "avg_bits", "cr_deploy")))
     assert len(bad) == 1 and "deployable bit total" in bad[0]
 
-    # bpw_target is deployable too, so it is equally redundant with cr_deploy.
+    # avg_bits is deployable too, so it is equally redundant with cr_deploy.
     assert check_redundancy(ObjectiveSet(
-        ("ppl_proxy", "bpw_target", "cr_deploy")))
+        ("ppl_proxy", "avg_bits", "cr_deploy")))
 
     # Deployable against archival is the pairing that actually works.
     assert check_redundancy(ObjectiveSet(
-        ("ppl_proxy", "bpw_target", "cr_archive"))) == []
-    assert check_redundancy(ObjectiveSet(("ppl_proxy", "bpw_target"))) == []
+        ("ppl_proxy", "avg_bits", "cr_archive"))) == []
+    assert check_redundancy(ObjectiveSet(("ppl_proxy", "avg_bits"))) == []
 
 
 def test_objective_labels_name_their_scope():
-    """bpw_target covers the projections, cr_archive the whole checkpoint, so
-    16/f2 does not equal f3. An axis that hides that invites the arithmetic."""
+    """avg_bits and cr_archive are both whole-checkpoint now, so scope alone
+    cannot tell them apart -- 16/f2 still does not equal f3, but because they
+    are built from different bit totals (deployable vs archival), which the
+    label text ("no Huffman" / "Huffman") states instead."""
     from evolmc.objectives import ObjectiveSet
 
-    o = ObjectiveSet(("ppl_proxy", "bpw_target", "cr_archive"))
-    assert o[1].axis_label == "bits per weight (target)"
+    o = ObjectiveSet(("ppl_proxy", "avg_bits", "cr_archive"))
+    assert o[1].axis_label == "bits per weight (whole)"
     assert o[2].axis_label == "CR, Huffman (whole)"
     assert o[0].axis_label == "proxy perplexity"   # no scope to name
 
@@ -959,13 +961,13 @@ def test_plot_labels_mark_the_direction_of_improvement():
     """
     from evolmc.objectives import ObjectiveSet
 
-    o = ObjectiveSet(("ppl_proxy", "bpw_target", "cr_archive"))
+    o = ObjectiveSet(("ppl_proxy", "avg_bits", "cr_archive"))
     assert o[0].arrow == r"$\downarrow$"      # perplexity: minimized
     assert o[1].arrow == r"$\downarrow$"      # bits per weight: minimized
     assert o[2].arrow == r"$\uparrow$"        # compression ratio: maximized
 
     # Scope and direction share ONE parenthesis rather than stacking two.
-    assert o[1].plot_label == r"bits per weight (target, $\downarrow$)"
+    assert o[1].plot_label == r"bits per weight (whole, $\downarrow$)"
     assert o[0].plot_label == r"proxy perplexity ($\downarrow$)"
     assert o[0].plot_label.count("(") == 1
 
@@ -1039,7 +1041,7 @@ def test_reference_direction_algorithms_build_at_three_objectives(name):
     cfg = Config()
     cfg.search.algorithm = name
     cfg.search.pop_size = 100
-    cfg.search.objectives = ("ppl_proxy", "bpw_target", "cr_archive")
+    cfg.search.objectives = ("ppl_proxy", "avg_bits", "cr_archive")
     algo = build_algorithm(cfg, g, np.zeros((100, g.n_var)))
     assert algo.ref_dirs.shape[1] == 3
     assert 100 <= len(algo.ref_dirs) <= 200
@@ -1065,9 +1067,9 @@ def _int_genome_for_algo():
 def _objset_comp():
     class FakeCost:
         def __init__(self, b):
-            self.bpw_target = self.bpw_model = b
+            self.avg_bits = b
         def summary(self):
-            return {"bpw_target": self.bpw_target, "cr_archive": 16.0 / self.bpw_target}
+            return {"avg_bits": self.avg_bits, "cr_archive": 16.0 / self.avg_bits}
 
     class FakeGenome:
         k_choices = (2, 8192)
@@ -1086,13 +1088,13 @@ def test_bounds_put_the_ideal_corner_first_for_each_direction():
 
     cfg = Config()
     cfg.plot.ylim_min, cfg.plot.ylim_pad = 1.0, 0.0
-    objset = ObjectiveSet(("ppl_proxy", "bpw_target", "cr_archive"))
-    rows = [{"ppl_proxy": 17884.0, "bpw_target": 1.0, "cr_archive": 2.78},
-            {"ppl_proxy": 27.7, "bpw_target": 13.0, "cr_archive": 1.24}]
+    objset = ObjectiveSet(("ppl_proxy", "avg_bits", "cr_archive"))
+    rows = [{"ppl_proxy": 17884.0, "avg_bits": 1.0, "cr_archive": 2.78},
+            {"ppl_proxy": 27.7, "avg_bits": 13.0, "cr_archive": 1.24}]
     bounds = derive_bounds(_objset_comp(), cfg, objset, rows, fp16_ppl=27.675)
 
     assert bounds[0][0] < bounds[0][1]      # ppl minimized: ideal is lower
-    assert bounds[1][0] < bounds[1][1]      # bpw minimized
+    assert bounds[1][0] < bounds[1][1]      # avg_bits minimized
     assert bounds[2][0] > bounds[2][1]      # CR MAXIMIZED: ideal is higher
     assert bounds[2][0] > 2.78 and bounds[2][1] < 1.24   # padded outwards
 
@@ -1103,7 +1105,7 @@ def test_refit_reopens_a_maximized_objective_in_its_own_direction():
 
     cfg = Config()
     cfg.plot.ylim_min = 1.0
-    objset = ObjectiveSet(("ppl_proxy", "bpw_target", "cr_archive"))
+    objset = ObjectiveSet(("ppl_proxy", "avg_bits", "cr_archive"))
     bounds = [(1.0, 500.0), (1.0, 13.0), (2.9, 1.2)]
 
     # Nothing outside the box.

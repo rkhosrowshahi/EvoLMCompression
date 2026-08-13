@@ -148,7 +148,7 @@ def test_dense_format_gives_pruning_no_credit_at_all():
 
     Under `dense` every weight POSITION carries a full index, so a pruned
     weight costs exactly what a live one does. Measured on the finished pruned
-    runs, candidates at the same bpw spanned 0.00 to 0.95 sparsity with
+    runs, candidates at the same avg_bits spanned 0.00 to 0.95 sparsity with
     cr_deploy identical to 6 decimals. That is correct for a dense LUT
     kernel and wrong as a statement about parameter count.
     """
@@ -342,7 +342,7 @@ def test_bitmap_has_a_one_bit_floor_and_csr_does_not():
     """Why the choice is qualitative, not just a few percent.
 
     The mask is one bit per ORIGINAL weight whatever the sparsity, so bitmap
-    cannot go below 1.0 bpw however much is pruned. CSR stores nothing for a
+    cannot go below 1.0 avg_bits however much is pruned. CSR stores nothing for a
     pruned weight and has no such floor. That is the whole reason the bitmap
     configs pin plot.xlim_min at 1.0.
     """
@@ -356,10 +356,10 @@ def test_bitmap_has_a_one_bit_floor_and_csr_does_not():
                            quant_cfg=cfg.quant, prune_cfg=cfg.prune, name="t")
     assert st.sparsity > 0.97
 
-    bpw = lambda f, **kw: ModelCost(
-        layers=[price_layer(st, fmt=f, **kw)], n_untouched_weights=0).bpw_target
-    assert bpw("bitmap") > 1.0
-    assert bpw("csr", csr_span_bits=8) < 1.0
+    avg_bits = lambda f, **kw: ModelCost(
+        layers=[price_layer(st, fmt=f, **kw)], n_untouched_weights=0).avg_bits
+    assert avg_bits("bitmap") > 1.0
+    assert avg_bits("csr", csr_span_bits=8) < 1.0
 
 
 def test_param_reduction_is_reported_separately_from_size():
@@ -419,7 +419,7 @@ def test_pruning_moves_the_archival_objective_and_not_the_deployable_one():
 
     The reserved zero codeword keeps the index width at ceil(log2 K) and
     k_centroids at K no matter how much is pruned, so t_lo/t_hi are invisible
-    to bpw_target and fully visible to cr_archive. Two genes that move one
+    to avg_bits and fully visible to cr_archive. Two genes that move one
     size objective and not the other are what make the front genuinely 3-D --
     if this ever fails, those configs are searching a 2-D problem.
     """
@@ -430,15 +430,15 @@ def test_pruning_moves_the_archival_objective_and_not_the_deployable_one():
     w = torch.randn(64, 4096)
     scale = w.std(1, keepdim=True)
     cfg = _cfgs()
-    objset = ObjectiveSet(("ppl_proxy", "bpw_target", "cr_archive"))
+    objset = ObjectiveSet(("ppl_proxy", "avg_bits", "cr_archive"))
 
     deployable, archival, sparsity = [], [], []
     for t in (0.0, 0.25, 0.5, 1.0, 1.5):
         _, st = compress_layer(w, scale, k=64, t_lo=-t, t_hi=t,
                                quant_cfg=cfg.quant, prune_cfg=cfg.prune, name="t")
         cost = ModelCost(layers=[price_layer(st)], n_untouched_weights=10_000)
-        _, bpw, cr = objset.values(1.0, cost.summary())
-        deployable.append(bpw)
+        _, avg_bits, cr = objset.values(1.0, cost.summary())
+        deployable.append(avg_bits)
         archival.append(cr)
         sparsity.append(st.sparsity)
 
@@ -491,7 +491,7 @@ def test_pruning_lowers_archival_cost_at_fixed_index_width():
 
 # -- accounting ------------------------------------------------------------
 
-def test_bpw_matches_hand_calculation():
+def test_avg_bits_matches_hand_calculation():
     """4096x4096 per-channel, K=16: 4 index bits + 4096 codebooks x 16 x 16 b."""
     n, out_f, k = 4096 * 4096, 4096, 16
     counts = torch.full((k,), n / k, dtype=torch.float64)
@@ -505,8 +505,8 @@ def test_bpw_matches_hand_calculation():
     assert c.index_bits_fixed == 4 * n
     assert c.codebook_bits == out_f * k * 16
     # 4 index bits + 4096*16*16 / 4096^2 = 4 + 0.0625 bits per weight.
-    assert c.bpw_deployable == pytest.approx(4.0625)
-    assert c.bpw_deployable - 4.0 == pytest.approx(0.0625)  # per-channel overhead
+    assert c.avg_bits_deployable == pytest.approx(4.0625)
+    assert c.avg_bits_deployable - 4.0 == pytest.approx(0.0625)  # per-channel overhead
 
 
 def test_per_group_codebooks_are_expensive():
@@ -520,11 +520,11 @@ def test_per_group_codebooks_are_expensive():
             k_nominal = k_centroids = k
             symbol_counts, k_used_mean, sparsity, mse = counts, k, 0.0, 0.0
         S.n_groups = n_groups
-        return price_layer(S(), 16).bpw_deployable
+        return price_layer(S(), 16).avg_bits_deployable
 
     per_channel = cost(4096)
     per_group = cost(n // gs)
-    # Per channel: +0.0625 bpw of codebook. Per group of 128: +2.0 bpw, i.e.
+    # Per channel: +0.0625 avg_bits of codebook. Per group of 128: +2.0 avg_bits, i.e.
     # the codebook costs half again as much as the indices it serves.
     assert per_channel == pytest.approx(4.0625)
     assert per_group == pytest.approx(6.0)
@@ -542,11 +542,11 @@ def test_model_cost_counts_untouched_weights():
         symbol_counts, k_used_mean, sparsity, mse = counts, 16, 0.0, 0.0
 
     mc = ModelCost(layers=[price_layer(S())], n_untouched_weights=n)
-    # Half the checkpoint stays fp16, so the honest whole-model CR is ~1.6x
-    # even though the compressed matrices are at 4 bits. Papers that quote only
-    # bpw_target on a model with large embeddings are hiding this gap.
-    assert mc.bpw_target == pytest.approx(4.0625)
-    assert mc.bpw_model == pytest.approx((4.0625 + 16) / 2)
+    # Half the checkpoint stays fp16, so the honest whole-model avg_bits is the
+    # AVERAGE of the compressed half (4.0625 bpw) and the untouched half (still
+    # fp16, 16 bpw) -- not just the compressed matrices' own 4.0625, which is
+    # what a target-only average would hide.
+    assert mc.avg_bits == pytest.approx((4.0625 + 16) / 2)
     assert mc.cr_deploy == pytest.approx(32 / (4.0625 + 16))
     assert mc.cr_deploy < 1.6
     # Flat histogram: entropy coding cannot help, so archival must not look
@@ -630,7 +630,7 @@ def test_ylim_min_ratio_lowers_the_box():
     from evolmc.plotting import derive_limits
 
     class FakeCost:
-        def __init__(self, b): self.bpw_target = self.bpw_model = b
+        def __init__(self, b): self.avg_bits = b
 
     class FakeGenome:
         k_choices = (4, 16)
@@ -890,12 +890,12 @@ def test_per_tensor_ceiling_is_not_binding_on_gpt2_sized_layers():
 
 # -- population initialization ---------------------------------------------
 
-def test_linspace_init_is_uniform_per_individual_and_even_in_index_bits():
+def test_logspace_init_is_uniform_per_individual_and_even_in_index_bits():
     """Every individual carries one K applied to all groups; the population
     spreads those K evenly in log space, i.e. evenly in index bits."""
     g = _int_genome(2, 8192, grouping="block")
     rng = np.random.default_rng(0)
-    pop = g.seed_population(14, rng, "linspace")
+    pop = g.seed_population(14, rng, "logspace")
 
     assert pop.shape == (14, g.n_var)
     ks = []
@@ -911,20 +911,20 @@ def test_linspace_init_is_uniform_per_individual_and_even_in_index_bits():
     assert max(ks) / min(ks) > 1000    # spans the range
 
 
-def test_linspace_beats_linear_spread_at_the_low_end():
+def test_logspace_beats_linear_spread_at_the_low_end():
     """A linear spread would put most individuals above K/2, where quality has
     plateaued, and almost none in the small-K region that matters."""
     g = _int_genome(2, 8192, grouping="global")
     rng = np.random.default_rng(0)
     ks = [next(iter({s.k for s in g.decode(r).values()}))
-          for r in g.seed_population(40, rng, "linspace")]
+          for r in g.seed_population(40, rng, "logspace")]
     below_256 = sum(k <= 256 for k in ks)
     linear = np.linspace(2, 8192, 40)
     assert below_256 >= 20                     # half the population
     assert sum(k <= 256 for k in linear) <= 2  # a linear spread gives ~1
 
 
-def test_linspace_respects_per_group_ceilings():
+def test_logspace_respects_per_group_ceilings():
     from evolmc.grouping import Genome
 
     layers = [_layer("transformer.h.0.mlp.c_fc", 3072, 768, 0, "mlp.c_fc"),
@@ -937,7 +937,7 @@ def test_linspace_respects_per_group_ceilings():
     cfg.variables.k_grouping = "block_type"
     g = Genome(layers, cfg.quant, cfg.prune, cfg.variables)
 
-    pop = g.seed_population(20, np.random.default_rng(0), "linspace")
+    pop = g.seed_population(20, np.random.default_rng(0), "logspace")
     caps = {l.name: l.in_features for l in layers}
     for row in pop:
         for name, st in g.decode(row).items():
@@ -963,7 +963,7 @@ def test_init_modes_are_selectable():
         g.seed_population(4, rng, "nonsense")
 
 
-def test_linspace_sweeps_the_pruning_band_too():
+def test_logspace_sweeps_the_pruning_band_too():
     from evolmc.grouping import Genome
 
     layers = [_layer("m.layers.0.q_proj", 4096, 4096, 0, "q_proj")]
@@ -973,7 +973,7 @@ def test_linspace_sweeps_the_pruning_band_too():
     cfg.quant.granularity = "per_tensor"
     g = Genome(layers, cfg.quant, cfg.prune, cfg.variables)
 
-    pop = g.seed_population(10, np.random.default_rng(0), "linspace")
+    pop = g.seed_population(10, np.random.default_rng(0), "logspace")
     bands = [g.decode(r)[layers[0].name] for r in pop]
     assert bands[0].t_hi == pytest.approx(0.0)
     assert bands[-1].t_hi == pytest.approx(2.0)

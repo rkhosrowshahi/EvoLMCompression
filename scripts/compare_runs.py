@@ -10,9 +10,9 @@ works for any set of runs over the same model and objective.
 Hypervolume is **recomputed for every run on one common box**, not read from
 each run's log. Stored HV is normalized by that run's own axis box, and the
 end-of-run refit can move a box, so the stored numbers are not comparable
-across runs. Same for the matched-bpw table: the point of the comparison is
+across runs. Same for the matched-avg_bits table: the point of the comparison is
 "at equal size, whose perplexity is lower", which requires interpolating each
-front at shared bpw levels rather than comparing whichever points each run
+front at shared avg_bits levels rather than comparing whichever points each run
 happened to land on.
 """
 
@@ -67,18 +67,18 @@ def load(run_path):
                 objset=objset, bounds=bounds)
 
 
-def ppl_at(front, bpw):
+def ppl_at(front, avg_bits):
     """Interpolate a front's perplexity at a given bits-per-weight.
 
     Linear in log-perplexity, which is the space the objective actually lives
     in. Returns None outside the front's range rather than extrapolating -- a
-    front that never reached 2 bpw has no answer there, and inventing one would
+    front that never reached 2 avg_bits has no answer there, and inventing one would
     flatter it.
     """
     x, y = front[:, 1], np.log10(np.clip(front[:, 0], 1e-12, None))
-    if bpw < x.min() or bpw > x.max():
+    if avg_bits < x.min() or avg_bits > x.max():
         return None
-    return float(10 ** np.interp(bpw, x, y))
+    return float(10 ** np.interp(avg_bits, x, y))
 
 
 def main():
@@ -90,8 +90,8 @@ def main():
     ap.add_argument("--venue", default=None)
     ap.add_argument("--width", default=None)
     ap.add_argument("--formats", default="png,pdf")
-    ap.add_argument("--bpw", default="2,3,4,6,8",
-                    help="bpw levels for the matched-size table")
+    ap.add_argument("--avg_bits", default="2,3,4,6,8",
+                    help="avg_bits levels for the matched-size table")
     args = ap.parse_args()
 
     runs = [load(find_run(r, args.root)) for r in args.runs]
@@ -152,7 +152,7 @@ def main():
     os.makedirs(out_dir, exist_ok=True)
 
     # ---- table -----------------------------------------------------------
-    levels = [float(v) for v in args.bpw.split(",")]
+    levels = [float(v) for v in args.avg_bits.split(",")]
     rows = []
     for r, label in zip(runs, labels):
         f = r["front"]
@@ -164,14 +164,14 @@ def main():
             "gens": len(r["gens"]),
             "front": len(f),
             "hypervolume": round(hv(f), 5),
-            "min_bpw": round(float(f[:, 1].min()), 3),
+            "min_avg_bits": round(float(f[:, 1].min()), 3),
             "best_ppl": round(float(f[:, 0].min()), 4),
             # Best value of any objective past the second, in its own
             # direction. Absent for 2-objective runs.
             **{f"best_{s.name}": round(
                 float(f[:, j].min() if s.sense == 1 else f[:, j].max()), 4)
                for j, s in enumerate(objset) if j >= 2},
-            **{f"ppl@{b:g}bpw": (round(v, 4) if (v := ppl_at(f, b)) else "")
+            **{f"ppl@{b:g}avg_bits": (round(v, 4) if (v := ppl_at(f, b)) else "")
                for b in levels},
         })
 
@@ -190,14 +190,14 @@ def main():
 
     best = {}
     for b in levels:
-        vals = [(r[f"ppl@{b:g}bpw"], r["run"]) for r in rows
-                if r[f"ppl@{b:g}bpw"] != ""]
+        vals = [(r[f"ppl@{b:g}avg_bits"], r["run"]) for r in rows
+                if r[f"ppl@{b:g}avg_bits"] != ""]
         if vals:
             best[b] = min(vals)
     if best:
         print("\nlowest perplexity at matched size:")
         for b, (v, who) in best.items():
-            print(f"  {b:g} bpw -> {who}  (ppl {v:.4f})")
+            print(f"  {b:g} avg_bits -> {who}  (ppl {v:.4f})")
 
     # ---- front overlay ---------------------------------------------------
     t = THEMES[cfg.plot.style]

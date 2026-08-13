@@ -14,7 +14,7 @@ Two rules that are easy to get wrong:
    should be flipping signs.
 
 2. Two objectives that are monotone transforms of the same underlying scalar
-   are not two objectives. `cr_deploy` is exactly `16 / bpw_model`, because
+   are not two objectives. `cr_deploy` is exactly `16 / avg_bits`, because
    both normalize `target_bits_deployable + untouched_bits` (see codec.py), so
    pairing them leaves dominance unchanged and the front is identical to the
    2-objective run. `check_redundancy` is what catches this at runtime; the
@@ -77,18 +77,15 @@ class Objective:
         return (a < b) if self.sense == MINIMIZE else (a > b)
 
 
-# Scope matters for the caption. `bpw_target` covers only the compressed
-# projection matrices, which is what GPTQ/AWQ/SqueezeLLM tables quote; the
-# cr_* ratios cover the whole checkpoint including untouched fp16 embeddings.
-# So 16/bpw_target does NOT equal cr_deploy, and a figure that does not say so
-# invites a reader to try the arithmetic and conclude something is broken.
+# Every size objective here covers the WHOLE checkpoint, target matrices plus
+# whatever stays untouched (embeddings, LM head, norms, biases) -- there is no
+# target-only variant. 16/avg_bits equals cr_deploy exactly (see
+# check_redundancy below), because both normalize the same deployable total.
 REGISTRY: dict[str, Objective] = {o.name: o for o in (
     Objective("ppl_proxy", MINIMIZE, "proxy perplexity", "", "", log=True),
 
     # -- deployable: fixed-width indices + codebooks, NO entropy coding -----
-    Objective("bpw_target", MINIMIZE, "bits per weight",
-              "target", "deployable"),
-    Objective("bpw_model", MINIMIZE, "bits per weight",
+    Objective("avg_bits", MINIMIZE, "bits per weight",
               "whole", "deployable"),
     Objective("cr_deploy", MAXIMIZE, "CR, no Huffman",
               "whole", "deployable"),
@@ -96,9 +93,7 @@ REGISTRY: dict[str, Objective] = {o.name: o for o in (
               "whole", "deployable"),
 
     # -- archive: Huffman-coded indices + codebooks + code-length tables ----
-    Objective("bpw_target_archival", MINIMIZE, "bits per weight, Huffman",
-              "target", "archival"),
-    Objective("bpw_model_archival", MINIMIZE, "bits per weight, Huffman",
+    Objective("avg_bits_archival", MINIMIZE, "bits per weight, Huffman",
               "whole", "archival"),
     Objective("cr_archive", MAXIMIZE, "CR, Huffman",
               "whole", "archival"),
@@ -152,7 +147,7 @@ def canonicalize_row(row: dict) -> dict:
     return out
 
 
-DEFAULT = ("ppl_proxy", "bpw_target")
+DEFAULT = ("ppl_proxy", "avg_bits")
 
 
 class ObjectiveSet:
@@ -246,11 +241,11 @@ class ObjectiveSet:
         return "objectives\n" + "\n".join(rows)
 
 
-def from_box(box: dict, size_objective: str = "bpw_target"):
+def from_box(box: dict, size_objective: str = "avg_bits"):
     """(ObjectiveSet, bounds) from a run's `data/plot_box.json`.
 
     Handles both layouts. Runs made before `search.objectives` existed stored
-    only `xlim`/`ylim` and were always (perplexity, bpw), so they are read back
+    only `xlim`/`ylim` and were always (perplexity, avg_bits), so they are read back
     as exactly that -- which keeps replot and compare_runs working on every
     finished run rather than only on new ones.
     """

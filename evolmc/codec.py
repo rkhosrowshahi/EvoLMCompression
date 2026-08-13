@@ -17,9 +17,10 @@ Two compression ratios are reported and they must never be mixed:
                 decoded before it can be used. Quote this only for
                 storage/transmission claims. Reported as `cr_archive`.
 
-`bpw_target` counts only the compressed projection matrices, which is what the
-GPTQ/AWQ/SqueezeLLM tables report. `bpw_model` counts the whole checkpoint,
-which is the honest end-to-end figure. Report both.
+`avg_bits` counts the whole checkpoint -- target matrices plus whatever stays
+untouched (embeddings, LM head, norms, biases) -- the honest end-to-end
+figure, unlike a target-only average that hides how much of the model was
+never touched.
 """
 
 from __future__ import annotations
@@ -140,11 +141,11 @@ class LayerCost:
         return self.index_bits_huffman + self.codebook_bits + self.table_bits
 
     @property
-    def bpw_deployable(self) -> float:
+    def avg_bits_deployable(self) -> float:
         return self.total_deployable / max(self.n_weights, 1)
 
     @property
-    def bpw_archival(self) -> float:
+    def avg_bits_archival(self) -> float:
         return self.total_archival / max(self.n_weights, 1)
 
 
@@ -351,23 +352,14 @@ class ModelCost:
 
     # -- headline numbers --------------------------------------------------
     @property
-    def bpw_target(self) -> float:
-        """Deployable bits per weight over the compressed matrices only."""
-        return self.target_bits_deployable / max(self.n_target_weights, 1)
-
-    @property
-    def bpw_target_archival(self) -> float:
-        return self.target_bits_archival / max(self.n_target_weights, 1)
-
-    @property
-    def bpw_model(self) -> float:
+    def avg_bits(self) -> float:
         """Deployable bits per weight over the entire checkpoint."""
         return (self.target_bits_deployable + self.untouched_bits) / max(
             self.n_total_weights, 1
         )
 
     @property
-    def bpw_model_archival(self) -> float:
+    def avg_bits_archival(self) -> float:
         return (self.target_bits_archival + self.untouched_bits) / max(
             self.n_total_weights, 1
         )
@@ -427,10 +419,8 @@ class ModelCost:
 
     def summary(self) -> dict:
         return {
-            "bpw_target": self.bpw_target,
-            "bpw_target_archival": self.bpw_target_archival,
-            "bpw_model": self.bpw_model,
-            "bpw_model_archival": self.bpw_model_archival,
+            "avg_bits": self.avg_bits,
+            "avg_bits_archival": self.avg_bits_archival,
             "cr_deploy": self.cr_deploy,
             "cr_archive": self.cr_archive,
             "cr_dense": self.cr_dense,
@@ -462,8 +452,7 @@ class ModelCost:
     def report(self) -> str:
         s = self.summary()
         return (
-            f"bpw  target {s['bpw_target']:.3f} (arch {s['bpw_target_archival']:.3f})"
-            f" | model {s['bpw_model']:.3f} (arch {s['bpw_model_archival']:.3f})\n"
+            f"avg bits  {s['avg_bits']:.3f} (arch {s['avg_bits_archival']:.3f})\n"
             f"CR   deploy {s['cr_deploy']:.2f}x (no Huffman)"
             f" | archive {s['cr_archive']:.2f}x (Huffman)\n"
             f"size {s['size_mb_original']:.0f} MB -> {s['size_mb_deployable']:.0f} MB"

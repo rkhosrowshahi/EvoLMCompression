@@ -47,7 +47,7 @@ _AUTO_AS_NONE = frozenset({
 _SPLIT = {"xlim": ("xlim_min", "xlim_max"), "ylim": ("ylim_min", "ylim_max")}
 
 Granularity = Literal["per_tensor", "per_channel", "per_group"]
-Binning = Literal["uniform", "quantile", "kmeans"]
+Binning = Literal["uniform", "quantile", "kmeans", "companding"]
 Grouping = Literal["global", "type", "block", "block_type"]
 
 
@@ -87,9 +87,9 @@ class QuantConfig:
     # Which is right depends on granularity, because it decides whether the
     # codebook term is visible. Index width is ceil(log2 K), so every K inside
     # a band costs the same indices and differs only in codebook size. At
-    # per_tensor that band spans ~0.0004 bpw on GPT-2 -- the top of the band
+    # per_tensor that band spans ~0.0004 avg_bits on GPT-2 -- the top of the band
     # (a power of two) wins outright and the extra integers buy nothing. At
-    # per_channel the same band spans ~1.3 bpw, so intermediate K are genuine
+    # per_channel the same band spans ~1.3 avg_bits, so intermediate K are genuine
     # operating points and restricting to powers of two discards most of them.
     k_encoding: Literal["choices", "integer"] = "choices"
     k_min: int = 2
@@ -132,13 +132,36 @@ class QuantConfig:
     # so the cap bounds memory: n_entries x layer_size x 4 bytes.
     cache_entries: int = 256
 
+    # -- companding / warp quantization (binning == "companding") -----------
+    # F = F_residual o F_gamma, quantized as round_uniform(F(x)) then
+    # reconstructed by the same bin-mean centroid every binning mode uses.
+    # F_gamma is an analytic density-matched backbone estimated per codebook
+    # group from its own histogram: lambda(x) ~ p(x)^gamma, the Bennett/
+    # Panter-Dite family (gamma=0 uniform, 1/3 MSE-optimal, 1 max-entropy).
+    # F_residual is a monotone piecewise-linear correction on top, genome-
+    # controlled per K-group alongside gamma and the clip threshold alpha.
+    # See evolmc/quantize.py:_companding_forward and evolmc/grouping.py.
+    companding_alpha_min: float = 2.0   # clip threshold, in units of group std
+    companding_alpha_max: float = 6.0
+    companding_gamma_min: float = 0.0   # 0 -> uniform backbone
+    companding_gamma_max: float = 1.0   # 1 -> equal-probability bins
+    companding_residual_genes: int = 6  # M piecewise-linear segments (genome)
+    companding_grid: int = 256          # histogram / backbone resolution
+    companding_reassign_iters: int = 3  # Lloyd passes when the reassign flag fires
+
 
 @dataclass
 class PruneConfig:
     enabled: bool = True
     # "sigma": threshold = t * per-group scale (std). Well-conditioned across
     # layers, which matters a lot for the EA. "raw": threshold is used directly.
-    mode: Literal["sigma", "raw"] = "sigma"
+    # "wanda": score-based rather than magnitude-based -- ranks each weight by
+    # |w| * (input-feature activation norm) instead of |w| alone, so a small
+    # weight on a heavily-used input can outrank a large weight on a barely-used
+    # one. (t_lo, t_hi) are reinterpreted as a sparsity FRACTION rather than a
+    # magnitude band -- see quantize.py:_wanda_alive. Needs a calibration pass
+    # (evolmc/wanda.py:calibrate) before the search starts.
+    mode: Literal["sigma", "raw", "wanda"] = "sigma"
     t_max: float = 2.0  # upper bound on each of (t_lo, t_hi)
     # Pruned weights are folded into the codebook as a reserved zero codeword,
     # so pruning costs no extra mask bits and shows up as entropy reduction.
@@ -178,16 +201,15 @@ class SearchConfig:
     pop_size: int = 40
     n_gen: int = 30
     seed: int = 0
-    # Optional hard budget; candidates above this bpw are infeasible.
-    max_bpw: float | None = None
-    # Objective 2: "bpw_target" matches what GPTQ/AWQ papers quote;
-    # "bpw_model" is the honest whole-checkpoint number.
-    #
-    # Subsumed by `objectives` below, which is what the search actually reads.
-    # Still used to pick the bpw measure the frozen x box and the baseline
-    # sweep's printout are derived from, so keep it equal to whichever bpw_*
-    # appears in `objectives` or the axes will not line up with the points.
-    size_objective: Literal["bpw_target", "bpw_model"] = "bpw_target"
+    # Optional hard budget; candidates above this avg_bits are infeasible.
+    max_avg_bits: float | None = None
+    # Which ModelCost.summary() key is "the size axis": what max_avg_bits is
+    # checked against and what the frozen x box / baseline sweep printout are
+    # derived from. Only one deployable size measure exists now (avg_bits,
+    # always whole-checkpoint), so this has a single valid value -- kept as a
+    # field rather than hard-coded so an archival-focused run could still
+    # point it at avg_bits_archival instead.
+    size_objective: Literal["avg_bits", "avg_bits_archival"] = "avg_bits"
     # What the search optimizes, in order. Names come from
     # objectives.REGISTRY: `ppl_proxy` plus any key of ModelCost.summary().
     # Direction is a property of the name, not of the list -- the cr_* ratios
@@ -198,22 +220,22 @@ class SearchConfig:
     #
     # The default reproduces the original two-objective problem exactly.
     # Beware pairing two size measures built from the same bit total, e.g.
-    # bpw_model with cr_deploy: those are monotone transforms of one
+    # avg_bits with cr_deploy: those are monotone transforms of one
     # another and add nothing. See objectives.check_redundancy.
-    objectives: tuple[str, ...] = ("ppl_proxy", "bpw_target")
+    objectives: tuple[str, ...] = ("ppl_proxy", "avg_bits")
     # Extra ModelCost.summary() keys to carry through the search and report per
     # generation, WITHOUT optimizing them. Sparsity is the obvious one: it is
     # the mechanism behind the size objective rather than an objective itself,
     # so watching it is how you tell whether pruning is actually being used.
     report_metrics: tuple[str, ...] = ("sparsity",)
     # How generation 0 is built.
-    #   "linspace" -- pop_size uniform-K individuals, K spread evenly in log
+    #   "logspace" -- pop_size uniform-K individuals, K spread evenly in log
     #                 space across the whole range. Generation 0 then lies
     #                 exactly on the fixed-bit baseline curve, so any later
     #                 improvement is visibly the search's doing.
     #   "ladder"   -- one individual per k_choices entry, random fill after.
     #   "random"   -- uniform random genes.
-    init: Literal["linspace", "ladder", "random"] = "linspace"
+    init: Literal["logspace", "ladder", "random"] = "logspace"
     # Deprecated alias: warm_start=False forces init="random".
     warm_start: bool = True
     # Evaluate the uniform-K configurations once before the search. These are
@@ -387,7 +409,7 @@ class PlotConfig:
     # null is derived once, before the first generation.
     #
     # Each bound may be given absolutely or, on y, as a ratio:
-    #   xlim_min/max     absolute bpw. Null derives from k_choices in closed
+    #   xlim_min/max     absolute avg_bits. Null derives from k_choices in closed
     #                    form, padded 5%.
     #   ylim_min/max     absolute perplexity.
     #   ylim_min_ratio   multiple of the lowest reference perplexity.

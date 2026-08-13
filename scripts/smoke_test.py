@@ -56,7 +56,7 @@ def main():
                          "per weight position and is blind to pruning")
     ap.add_argument("--objectives", default=None,
                     help="comma-separated objective names, e.g. "
-                         "ppl_proxy,bpw_target,cr_archive. Default is the "
+                         "ppl_proxy,avg_bits,cr_archive. Default is the "
                          "two-objective problem.")
     args = ap.parse_args()
 
@@ -101,7 +101,7 @@ def main():
     print(f"\nfp16 baseline ppl {base:.3f}   ({t_fwd:.2f}s for "
           f"{windows.shape[0]} windows)\n")
 
-    print(f"{'config':<22}{'ppl':>10}{'bpw':>8}{'CR':>8}{'CR-huf':>9}"
+    print(f"{'config':<22}{'ppl':>10}{'avg_bits':>8}{'CR':>8}{'CR-huf':>9}"
           f"{'spars':>8}{'apply':>8}")
     print("-" * 68)
     for k in comp.genome.k_choices:
@@ -111,7 +111,7 @@ def main():
             ppl = perplexity(comp.model, windows, device=comp.device)
             s = cand.cost.summary()
             print(f"{'K=%d t=%.1f' % (k, t):<22}{ppl:>10.3f}"
-                  f"{s['bpw_target']:>8.2f}{s['cr_deploy']:>8.2f}"
+                  f"{s['avg_bits']:>8.2f}{s['cr_deploy']:>8.2f}"
                   f"{s['cr_archive']:>9.2f}{s['sparsity']:>8.3f}"
                   f"{cand.apply_seconds:>8.2f}")
     comp.restore()

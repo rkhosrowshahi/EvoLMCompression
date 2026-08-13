@@ -5,7 +5,7 @@ The runs were priced with `deployable_format: dense`, which charges one index
 per weight POSITION. A pruned weight therefore costs exactly what a live one
 does, and sparsity changes the deployable size by zero -- verified on the
 finished pruned runs, where candidates spanning 0.00 to 0.95 sparsity at the
-same bpw had identical cr_deploy to six decimals.
+same avg_bits had identical cr_deploy to six decimals.
 
 This script re-derives the real per-layer statistics for every front member and
 prices each one three ways, so the size benefit of pruning becomes visible
@@ -75,7 +75,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--runs", nargs="*", default=DEFAULT_RUNS)
     ap.add_argument("--root", default="logs")
-    ap.add_argument("--config", default="configs/gpt2_k_layer_3obj_prune.yaml",
+    ap.add_argument("--config", default="configs/uq_pruning/gpt2_124m/gpt2_124m-layer_quant-global_prune_sigma-bitmap-3obj.yaml",
                     help="only the model/quant settings are used")
     ap.add_argument("--limit", type=int, default=None,
                     help="price only the first N front members (for a quick look)")
@@ -133,7 +133,7 @@ def main():
                             for st in stats],
                     n_untouched_weights=n_untouched)
                 s = mc.summary()
-                row[f"{fmt}_bpw_target"] = round(s["bpw_target"], 5)
+                row[f"{fmt}_avg_bits"] = round(s["avg_bits"], 5)
                 row[f"{fmt}_cr"] = round(s["cr_deploy"], 5)
                 row[f"{fmt}_size_mb"] = round(s["size_mb_deployable"], 4)
                 if fmt == "dense":

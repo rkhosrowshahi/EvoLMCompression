@@ -148,6 +148,109 @@ def _lloyd(w, alive, kc, idx, init, iters):
     return idx, cent, cnts
 
 
+def _masked_std(w: torch.Tensor, alive: torch.Tensor) -> torch.Tensor:
+    """Per-group std over the surviving weights only."""
+    alive_f = alive.to(torch.float32)
+    n_alive = alive_f.sum(dim=1, keepdim=True).clamp_min(1.0)
+    mean = (w * alive_f).sum(dim=1, keepdim=True) / n_alive
+    var = ((w - mean).pow(2) * alive_f).sum(dim=1, keepdim=True) / n_alive
+    return var.clamp_min(1e-12).sqrt()
+
+
+def _companding_forward(w: torch.Tensor, alive: torch.Tensor, alpha: float,
+                        gamma: float, u: torch.Tensor, grid: int = 256) -> torch.Tensor:
+    """Companding warp F = F_residual o F_gamma, evaluated at every weight.
+
+    F_gamma is the Bennett/Panter-Dite density-matched backbone: level density
+    lambda(x) ~ p(x)^gamma, estimated per group from a `grid`-bin histogram of
+    its own surviving weights, clipped to +-alpha standard deviations. gamma=0
+    reduces the backbone to a uniform CDF (the clip range becomes the only
+    difference from plain uniform binning); gamma=1/3 is the classic MSE-
+    optimal quantizer; gamma=1 equalizes bin probabilities.
+
+    F_residual is a monotone piecewise-linear correction on [0,1], built from
+    `len(u)` positive segment weights (softmax of `u`), applied on top of the
+    backbone. u == 0 decodes to equal segment weights, i.e. the identity map,
+    so a genome with the residual genes at zero leaves the backbone untouched.
+
+    Returns F(w) in [0,1], same shape as `w`. Reconstruction never inverts F:
+    like every other binning mode here, the codeword is the bin mean of the
+    original (unwarped) values (`_centroids`), so F only needs to be evaluated
+    forward, at the actual data points.
+    """
+    std = _masked_std(w, alive)
+    lo = -alpha * std
+    hi = alpha * std
+    xc = torch.min(torch.max(w, lo), hi)
+
+    span = (hi - lo).clamp_min(1e-12)
+    bin_w = span / grid
+    bucket = ((xc - lo) / bin_w).floor().clamp_(0, grid - 1).long()
+    hist = torch.zeros(w.shape[0], grid, device=w.device, dtype=torch.float32)
+    ones = alive.to(torch.float32)
+    hist.scatter_add_(1, bucket, ones)
+    dens = (hist / hist.sum(dim=1, keepdim=True).clamp_min(1.0)).clamp_min(1e-8)
+    lam = dens.pow(gamma)
+    cdf = torch.cumsum(lam, dim=1)
+    cdf = cdf / cdf[:, -1:].clamp_min(1e-12)
+    f_base = torch.cat([torch.zeros_like(cdf[:, :1]), cdf], dim=1)  # [G, grid+1]
+
+    m = u.shape[0]
+    slopes = m * torch.softmax(u, dim=0)  # [M], positive, mean 1
+    seg = slopes / m
+    breakpoints = torch.cat([torch.zeros(1, device=u.device, dtype=seg.dtype),
+                             torch.cumsum(seg, dim=0)])  # [M+1], 0 -> 1
+    pos = (f_base * m).clamp(0, m - 1e-6)
+    seg_idx = pos.floor().long().clamp(0, m - 1)
+    frac = pos - seg_idx.to(pos.dtype)
+    f_grid = breakpoints[seg_idx] + frac * slopes[seg_idx] / m
+    f_grid = f_grid.clamp(0.0, 1.0)
+    f_grid[:, -1] = 1.0
+
+    pos_w = ((xc - lo) / bin_w).clamp(0, grid)
+    idx0 = pos_w.floor().long().clamp(0, grid - 1)
+    idx1 = idx0 + 1
+    frac_w = (pos_w - idx0.to(pos_w.dtype)).clamp(0, 1)
+    v0 = torch.gather(f_grid, 1, idx0)
+    v1 = torch.gather(f_grid, 1, idx1)
+    return (v0 + frac_w * (v1 - v0)).clamp(0.0, 1.0)
+
+
+def _companding_assign(f: torch.Tensor, kc: int) -> torch.Tensor:
+    """Uniform binning in the warped domain -- round_uniform(F(x))."""
+    idx = (f * kc).floor()
+    return idx.clamp_(0, kc - 1).long()
+
+
+def _wanda_alive(rows: torch.Tensor, act_norm: torch.Tensor, t_lo: float,
+                 t_hi: float, t_max: float) -> torch.Tensor:
+    """Score-based prune mask: keep the highest-scoring weights per row.
+
+    score = |w_ij| * ||X_j|| (Wanda). (t_lo, t_hi) are not a magnitude band
+    here -- there is no natural "sign" to a non-negative score -- they are
+    reinterpreted as a sparsity FRACTION: each ranges over [0, t_max] in
+    magnitude, same as sigma/raw, so (|t_lo| + t_hi) / (2*t_max) always lands
+    in [0, 1] regardless of t_max, and needs no separate genome or config
+    field. frac=0 prunes nothing; frac=1 prunes the whole row.
+
+    The cut is PER ROW (per output channel), matching how sigma/raw already
+    scale per row -- the fraction pruned is the same on every row, but which
+    specific weights survive depends on that row's own score distribution.
+    """
+    frac = (abs(t_lo) + t_hi) / (2.0 * max(t_max, 1e-12))
+    frac = min(max(frac, 0.0), 1.0)
+    score = rows.abs() * act_norm.to(rows.dtype).reshape(1, -1)
+    if frac <= 0.0:
+        return torch.ones_like(rows, dtype=torch.bool)
+    if frac >= 1.0:
+        return torch.zeros_like(rows, dtype=torch.bool)
+    ordered, _ = torch.sort(score, dim=1)
+    n = score.shape[1]
+    rank = min(int(frac * n), n - 1)
+    thresh = ordered[:, rank : rank + 1]
+    return score >= thresh
+
+
 def compress_layer(
     rows: torch.Tensor,
     row_scale: torch.Tensor,
@@ -157,6 +260,12 @@ def compress_layer(
     quant_cfg,
     prune_cfg,
     name: str = "",
+    alpha: float | None = None,
+    gamma: float | None = None,
+    u=None,
+    force_zero: bool = False,
+    reassign: bool = False,
+    act_norm: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, LayerQuantStats]:
     """Compress one [out, in] weight matrix. Returns (reconstruction, stats)."""
     if k < 2:
@@ -168,10 +277,19 @@ def compress_layer(
     if pruning_on:
         if prune_cfg.mode == "sigma":
             lo_abs, hi_abs = t_lo * row_scale, t_hi * row_scale
-        else:
+            alive_rows = (rows <= lo_abs) | (rows >= hi_abs)
+        elif prune_cfg.mode == "raw":
             lo_abs = torch.full_like(row_scale, t_lo)
             hi_abs = torch.full_like(row_scale, t_hi)
-        alive_rows = (rows <= lo_abs) | (rows >= hi_abs)
+            alive_rows = (rows <= lo_abs) | (rows >= hi_abs)
+        elif prune_cfg.mode == "wanda":
+            if act_norm is None:
+                raise ValueError(
+                    "prune.mode == 'wanda' requires act_norm -- call "
+                    "Compressor.calibrate_wanda(windows) before the search")
+            alive_rows = _wanda_alive(rows, act_norm, t_lo, t_hi, prune_cfg.t_max)
+        else:
+            raise ValueError(f"unknown prune mode: {prune_cfg.mode}")
     else:
         alive_rows = torch.ones_like(rows, dtype=torch.bool)
 
@@ -199,6 +317,21 @@ def compress_layer(
         offsets = torch.arange(kc, device=w.device, dtype=w.dtype).view(1, -1)
         init = lo + (offsets + 0.5) * step  # bin midpoints
         idx, cent, cnts = _lloyd(w, alive, kc, idx, init, quant_cfg.kmeans_iters)
+    elif quant_cfg.binning == "companding":
+        if alpha is None or gamma is None or u is None:
+            raise ValueError("companding binning requires alpha, gamma and u")
+        u_t = torch.as_tensor(u, dtype=torch.float32, device=w.device)
+        f = _companding_forward(w, alive, float(alpha), float(gamma), u_t,
+                                grid=getattr(quant_cfg, "companding_grid", 256))
+        idx = _companding_assign(f, kc)
+        cent, cnts = _centroids(w, idx, alive, kc)
+        if reassign:
+            iters = getattr(quant_cfg, "companding_reassign_iters", 3)
+            idx, cent, cnts = _lloyd(w, alive, kc, idx, cent, iters)
+        if force_zero and kc > 0:
+            cent = cent.clone()
+            flat = cent.abs().argmin(dim=1)
+            cent[torch.arange(cent.shape[0], device=cent.device), flat] = 0.0
     else:
         raise ValueError(f"unknown binning: {quant_cfg.binning}")
 
@@ -256,10 +389,10 @@ class LayerPrecompute:
         self.hits = 0
         self.misses = 0
 
-    def key(self, name: str, k: int, t_lo: float, t_hi: float):
+    def key(self, name: str, k: int, t_lo: float, t_hi: float, extra=None):
         if t_lo < 0.0 or t_hi > 0.0:
             return None  # pruning-dependent results are not cached
-        return (name, k)
+        return (name, k) if extra is None else (name, k, extra)
 
     def get(self, key):
         if key is None or not self.enabled:

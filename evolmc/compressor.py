@@ -49,6 +49,22 @@ class Compressor:
         self.cache = LayerPrecompute(enabled=not cfg.prune.enabled,
                                      max_entries=cfg.quant.cache_entries)
         self.n_evals = 0
+        # Populated by calibrate_wanda() when prune.mode == "wanda"; every
+        # other mode leaves this None and never reads it.
+        self.wanda_norms = None
+
+    def calibrate_wanda(self, windows) -> "wanda.ActivationNorms":
+        """Measure per-input-feature activation norms once, before the search.
+
+        Required before any .apply() call when cfg.prune.mode == "wanda" --
+        compress_layer raises a clear error otherwise rather than silently
+        pruning by magnitude.
+        """
+        from . import wanda
+
+        result = wanda.calibrate(self, windows)
+        self.wanda_norms = result.norms
+        return result
 
     # -- core ---------------------------------------------------------------
 
@@ -58,9 +74,15 @@ class Compressor:
         settings = self.genome.decode(x)
         cost = ModelCost(n_untouched_weights=self.n_untouched)
 
+        companding = self.cfg.quant.binning == "companding"
         for layer in self.targets:
             s = settings[layer.name]
-            key = self.cache.key(layer.name, s.k, s.t_lo, s.t_hi)
+            extra = None
+            if companding:
+                extra = (round(s.alpha, 6), round(s.gamma, 6),
+                         tuple(round(float(v), 6) for v in s.u),
+                         s.force_zero, s.reassign)
+            key = self.cache.key(layer.name, s.k, s.t_lo, s.t_hi, extra)
             hit = self.cache.get(key)
             if hit is not None:
                 recon, stats = hit
@@ -74,6 +96,12 @@ class Compressor:
                     quant_cfg=self.cfg.quant,
                     prune_cfg=self.cfg.prune,
                     name=layer.name,
+                    alpha=s.alpha,
+                    gamma=s.gamma,
+                    u=s.u,
+                    force_zero=s.force_zero,
+                    reassign=s.reassign,
+                    act_norm=self.wanda_norms.get(layer.name) if self.wanda_norms else None,
                 )
                 self.cache.put(key, (recon, stats))
             self.master.write(layer, recon)
@@ -97,7 +125,7 @@ class Compressor:
         """Price a genome without touching the model.
 
         Cheap enough to call on millions of genomes, so use it to pre-screen a
-        population against a bpw budget before spending forward passes.
+        population against an avg_bits budget before spending forward passes.
         """
         settings = self.genome.decode(x)
         cost = ModelCost(n_untouched_weights=self.n_untouched)

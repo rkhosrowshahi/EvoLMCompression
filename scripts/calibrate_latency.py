@@ -70,12 +70,12 @@ def main():
     # much cheaper to notice that here than after a 10,000-evaluation search.
     fp16 = proxy.predict_fp16()
     print(f"\nproxy at uniform K (ms/token).  fp16 baseline {fp16:.4f} ms/token")
-    print(f"  {'K':>6}  {'bpw_model':>10}  {'latency':>9}  {'speedup':>8}")
+    print(f"  {'K':>6}  {'avg_bits':>14}  {'latency':>9}  {'speedup':>8}")
     for k in comp.genome.k_choices:
         cand = comp.apply(comp.genome.encode_uniform(k))
         t = proxy.predict(cand.cost)
         cs = cand.cost.summary()
-        print(f"  {k:>6}  {cs['bpw_model']:>10.3f}  {t:>9.4f}  "
+        print(f"  {k:>6}  {cs['avg_bits']:>14.3f}  {t:>9.4f}  "
               f"{fp16 / max(t, 1e-9):>7.2f}x")
     comp.restore()
 

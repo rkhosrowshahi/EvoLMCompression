@@ -62,7 +62,7 @@ def build_algorithm(cfg, genome, sampling):
     if name == "nsga2":
         return NSGA2(eliminate_duplicates=s.eliminate_duplicates, **common)
 
-    n_obj = len(getattr(s, "objectives", None) or ("ppl_proxy", "bpw_target"))
+    n_obj = len(getattr(s, "objectives", None) or ("ppl_proxy", "avg_bits"))
     n_part = s.ref_dir_partitions or das_dennis_partitions(n_obj, s.pop_size)
     ref_dirs = get_reference_directions("das-dennis", n_obj, n_partitions=n_part)
     if name == "unsga3":
@@ -110,15 +110,16 @@ def baseline_sweep(problem, run):
     fp16 = proxy_fitness(comp.model, problem.windows, device=comp.device)
     run.log(f"  fp16                     ppl {fp16:10.3f}")
 
-    rows = [{"tag": "fp16", "K": 0, "ppl_proxy": fp16, "bpw_target": 16.0,
-             "bpw_model": 16.0, "cr_deploy": 1.0}]
+    rows = [{"tag": "fp16", "K": 0, "ppl_proxy": fp16, "avg_bits": 16.0,
+             "avg_bits_archival": 16.0, "cr_deploy": 1.0}]
     points, measured = [], []
     for k in comp.genome.k_choices:
         cand = comp.apply(comp.genome.encode_uniform(k))
         ppl = proxy_fitness(comp.model, problem.windows, device=comp.device)
         s = cand.cost.summary()
-        bpw = (s["bpw_target"] if problem.cfg.search.size_objective == "bpw_target"
-               else s["bpw_model"])
+        avg_bits = (s["avg_bits_archival"]
+               if problem.cfg.search.size_objective == "avg_bits_archival"
+               else s["avg_bits"])
         # The reference sweep is where the frozen objective box comes from, so
         # every objective must appear in it -- including a predicted one.
         # Without this, derive_bounds raises "absent from the reference sweep"
@@ -130,8 +131,8 @@ def baseline_sweep(problem, run):
         # derived from. cost_only's flat-histogram estimate would put the true
         # archival values outside any box derived from it.
         measured.append({"ppl_proxy": ppl, **s})
-        points.append((bpw, ppl, k))
-        run.log(f"  uniform K={k:<4}            ppl {ppl:10.3f}   bpw {bpw:5.2f}"
+        points.append((avg_bits, ppl, k))
+        run.log(f"  uniform K={k:<4}            ppl {ppl:10.3f}   avg_bits {avg_bits:5.2f}"
                 f"   CR {s['cr_deploy']:5.2f}x")
     comp.restore()
 
@@ -217,7 +218,7 @@ def run_search(problem, cfg, run, resume_from: str | None = None):
         algorithm.problem = problem
         run.log(f"resumed from {resume_from} at generation {algorithm.n_gen}")
     else:
-        mode = getattr(cfg.search, "init", "linspace")
+        mode = getattr(cfg.search, "init", "logspace")
         if not cfg.search.warm_start:
             mode = "random"       # deprecated alias, kept working
         sampling = genome.seed_population(cfg.search.pop_size, rng, mode)
@@ -317,8 +318,8 @@ def run_search(problem, cfg, run, resume_from: str | None = None):
         }
         # Kept so the existing readers of generations.jsonl keep working.
         rec["best_ppl"] = best.get(objset[0].name)
-        rec["min_bpw"] = best.get(objset[1].name)
-        rec["max_bpw"] = worst.get(objset[1].name)
+        rec["min_avg_bits"] = best.get(objset[1].name)
+        rec["max_avg_bits"] = worst.get(objset[1].name)
         records.append(rec)
         run.jsonl("generations", rec)
         cells = [_pair(best[s.name], worst[s.name]) for s in objset]
@@ -461,8 +462,8 @@ def _log_hv_reference(run, hv, fp16, baselines, cfg, objset):
     if baselines:
         lo = min(baselines, key=lambda b: b[0])
         hi = max(baselines, key=lambda b: b[0])
-        run.log(f"                bpw span from uniform K={lo[2]} "
-                f"({lo[0]:.3f} bpw) to K={hi[2]} ({hi[0]:.3f} bpw), +5% pad")
+        run.log(f"                avg_bits span from uniform K={lo[2]} "
+                f"({lo[0]:.3f} avg_bits) to K={hi[2]} ({hi[0]:.3f} avg_bits), +5% pad")
         y0, y1 = _axis(hv.bounds[0])
         off = [b for b in baselines if not (y0 <= b[1] <= y1)]
         if off:
@@ -610,7 +611,7 @@ def save_front(res, problem, cfg, run):
             "objectives": values,
             # Kept for readers written against the 2-objective layout.
             "ppl_proxy": values.get(objset[0].name, float(F[i, 0])),
-            "bpw_objective": float(F[i, 1]),
+            "avg_bits_objective": float(F[i, 1]),
             "settings": {n: {"k": s.k, "t_lo": round(s.t_lo, 4),
                              "t_hi": round(s.t_hi, 4)}
                          for n, s in settings.items()},
@@ -626,7 +627,7 @@ def save_front(res, problem, cfg, run):
                      **{f"f{j + 1}_{n}": round(float(F[i, j]), 5)
                         for j, n in enumerate(objset.names)},
                      "ppl_proxy": round(float(F[i, 0]), 4),
-                     "bpw_objective": round(float(F[i, 1]), 4),
+                     "avg_bits_objective": round(float(F[i, 1]), 4),
                      **{f"est_{k}": round(v, 5) for k, v in cost.summary().items()}})
 
     with open(run.file("data", "front.json"), "w") as f:

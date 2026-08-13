@@ -5,18 +5,18 @@ through `objectives.ObjectiveSet`; see that module for the registry and the
 sign convention. The default list is
 
   f1 = proxy perplexity on held-in calibration windows   (minimized)
-  f2 = bits per weight over the target matrices          (minimized)
+  f2 = bits per weight over the whole checkpoint         (minimized)
 
 which is the original two-objective problem.
 
-bpw is preferred over -CR for the size axis because it is linear in the thing
+avg_bits is preferred over -CR for the size axis because it is linear in the thing
 the search actually controls and because every baseline in the literature is
 quoted in bits. CR is derived and logged alongside, and can be made an
 objective in its own right -- but only usefully when it is drawn from a
-*different* bit total than the bpw objective, since `cr_deploy` is exactly
-`16 / bpw_model` and adds nothing next to any deployable bpw measure.
+*different* bit total than the avg_bits objective, since `cr_deploy` is exactly
+`16 / avg_bits` and adds nothing next to it.
 
-Optional constraint: g1 = bpw - max_bpw <= 0, always applied to the
+Optional constraint: g1 = avg_bits - max_avg_bits <= 0, always applied to the
 `size_objective` measure regardless of what is being optimized.
 """
 
@@ -59,7 +59,7 @@ class CompressionProblem(ElementwiseProblem):
         super().__init__(
             n_var=compressor.genome.n_var,
             n_obj=self.objectives.n_obj,
-            n_ieq_constr=1 if cfg.search.max_bpw is not None else 0,
+            n_ieq_constr=1 if cfg.search.max_avg_bits is not None else 0,
             xl=xl,
             xu=xu,
         )
@@ -87,14 +87,14 @@ class CompressionProblem(ElementwiseProblem):
         for name in self.report_metrics:
             out[name] = float(summary[name])
 
-        if self.cfg.search.max_bpw is not None:
+        if self.cfg.search.max_avg_bits is not None:
             # The budget is a statement about deployed size, so it is checked
             # against size_objective whether or not that measure is being
             # optimized. Reading it off the objective vector instead would
             # silently constrain the wrong quantity when the front is drawn on
             # archival axes.
             size = summary[self.cfg.search.size_objective]
-            out["G"] = [size - self.cfg.search.max_bpw]
+            out["G"] = [size - self.cfg.search.max_avg_bits]
 
         record = {
             "eval": self.compressor.n_evals,

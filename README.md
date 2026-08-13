@@ -25,11 +25,11 @@ python scripts/smoke_test.py --model gpt2
 Search, then evaluate the front on held-out data:
 
 ```bash
-python scripts/run_search.py configs/gpt2_k_layer.yaml
+python scripts/run_search.py configs/uq/gpt2_124m/gpt2_124m-layer_quant-2obj.yaml
 ```
 
 ```bash
-python scripts/run_eval.py configs/gpt2_k_layer.yaml logs/gpt2-k-layer
+python scripts/run_eval.py configs/uq/gpt2_124m/gpt2_124m-layer_quant-2obj.yaml logs/gpt2_124m-layer_quant-2obj-np100-ng100
 ```
 
 Each run writes one timestamped directory under `logs/` containing its config,
@@ -48,7 +48,7 @@ logs, checkpoints, Pareto figures and a video of the front converging.
 
 ## Experiments
 
-`configs/gpt2_k_*.yaml` are a granularity ablation — global, block-wise and
+`configs/uq*/gpt2_124m/gpt2_k_*.yaml` are a granularity ablation — global, block-wise and
 layer-wise `K` — differing in exactly one line so the fronts are comparable.
 
 ```bash

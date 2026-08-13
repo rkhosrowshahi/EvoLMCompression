@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Run one compression search.
 
-    python scripts/run_search.py configs/dev_gpt2.yaml
-    python scripts/run_search.py configs/pythia_410m.yaml --name ablation-kmeans
-    python scripts/run_search.py configs/llama2_7b.yaml --resume gpt2-k-layer
+    python scripts/run_search.py configs/uq_pruning/gpt2_124m/gpt2_124m-type_quant-global_prune_sigma-bitmap-2obj.yaml
+    python scripts/run_search.py configs/uq_pruning/pythia_410m/pythia_410m.yaml --name ablation-kmeans
+    python scripts/run_search.py configs/uq_pruning/llama2_7b/llama2_7b.yaml --resume gpt2-k-layer
 
 Everything for the run lands in one timestamped directory under logs/.
 """
@@ -76,6 +76,16 @@ def main():
     budget = cfg.search.pop_size * cfg.search.n_gen
     run.log(f"\nsearch: {cfg.search.algorithm} pop={cfg.search.pop_size} "
             f"gen={cfg.search.n_gen} -> ~{budget} evaluations")
+
+    # prune.mode == "wanda" scores weights against calibration-data activation
+    # norms rather than magnitude alone. Those norms depend only on the frozen
+    # fp16 weights and the calibration data, never on a candidate genome, so
+    # they are measured once here rather than recomputed per evaluation.
+    if cfg.prune.enabled and cfg.prune.mode == "wanda":
+        run.log("\ncalibrating wanda activation norms ...")
+        wanda_norms = comp.calibrate_wanda(splits["proxy"])
+        run.log(f"  {len(wanda_norms.norms)} layers, "
+                f"{wanda_norms.n_tokens} calibration tokens")
 
     # `latency_proxy` is PREDICTED from the per-layer bit accounting against
     # coefficients fitted once on this GPU and frozen to a file. The fit costs a

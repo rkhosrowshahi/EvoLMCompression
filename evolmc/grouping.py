@@ -69,6 +69,13 @@ class LayerSetting:
     k: int
     t_lo: float  # lower edge of the pruning band (<= 0)
     t_hi: float  # upper edge of the pruning band (>= 0)
+    # Companding / warp quantization (binning == "companding" only). None for
+    # every other binning mode, which never reads these fields.
+    alpha: float | None = None       # clip threshold, in units of group std
+    gamma: float | None = None       # backbone density exponent
+    u: np.ndarray | None = None      # raw residual-warp genes, length M
+    force_zero: bool = False         # snap the nearest centroid to exactly 0
+    reassign: bool = False           # Lloyd-reassign the warp bins after binning
 
 
 class Genome:
@@ -113,8 +120,24 @@ class Genome:
         else:
             self.p_groups, self.p_assign, self.n_p = [], {}, 0
 
-        # Layout: [K vars ...][t_lo vars ...][t_hi vars ...]
-        self.n_var = self.n_k + 2 * self.n_p
+        # Companding warp shares its groups with K: a warp shape and a
+        # codebook size jointly define one quantizer, so there is no
+        # separate `warp_grouping` dial. Per group: alpha, gamma, M residual
+        # slopes, 2 flag genes (force_zero, reassign).
+        self.companding = (getattr(quant_cfg, "binning", "uniform") == "companding")
+        if self.companding:
+            self.warp_m = int(getattr(quant_cfg, "companding_residual_genes", 6))
+            self.warp_dim = 2 + self.warp_m + 2
+            self.n_w = self.n_k
+            self.alpha_min = float(getattr(quant_cfg, "companding_alpha_min", 2.0))
+            self.alpha_max = float(getattr(quant_cfg, "companding_alpha_max", 6.0))
+            self.gamma_min = float(getattr(quant_cfg, "companding_gamma_min", 0.0))
+            self.gamma_max = float(getattr(quant_cfg, "companding_gamma_max", 1.0))
+        else:
+            self.warp_m = self.warp_dim = self.n_w = 0
+
+        # Layout: [K vars ...][t_lo vars ...][t_hi vars ...][warp vars ...]
+        self.n_var = self.n_k + 2 * self.n_p + self.n_w * self.warp_dim
 
     # -- encoding helpers -------------------------------------------------
 
@@ -127,19 +150,39 @@ class Genome:
 
         if self.n_p:
             lo = x[self.n_k : self.n_k + self.n_p] * self.prune.t_max
-            hi = x[self.n_k + self.n_p :] * self.prune.t_max
+            hi = x[self.n_k + self.n_p : self.n_k + 2 * self.n_p] * self.prune.t_max
         else:
             lo = hi = np.zeros(0)
 
+        warp = None
+        if self.companding:
+            off = self.n_k + 2 * self.n_p
+            wx = x[off : off + self.n_w * self.warp_dim].reshape(self.n_w, self.warp_dim)
+            alpha = self.alpha_min + wx[:, 0] * (self.alpha_max - self.alpha_min)
+            gamma = self.gamma_min + wx[:, 1] * (self.gamma_max - self.gamma_min)
+            u = wx[:, 2 : 2 + self.warp_m]
+            force_zero = wx[:, 2 + self.warp_m] >= 0.5
+            reassign = wx[:, 2 + self.warp_m + 1] >= 0.5
+            warp = (alpha, gamma, u, force_zero, reassign)
+
         out: dict[str, LayerSetting] = {}
         for layer in self.layers:
-            k = k_per_group[self.k_assign[layer.name]]
+            g = self.k_assign[layer.name]
+            k = k_per_group[g]
             if self.n_p:
-                g = self.p_assign[layer.name]
-                t_lo, t_hi = -float(lo[g]), float(hi[g])
+                pg = self.p_assign[layer.name]
+                t_lo, t_hi = -float(lo[pg]), float(hi[pg])
             else:
                 t_lo = t_hi = 0.0
-            out[layer.name] = LayerSetting(k=k, t_lo=t_lo, t_hi=t_hi)
+            if warp is None:
+                out[layer.name] = LayerSetting(k=k, t_lo=t_lo, t_hi=t_hi)
+            else:
+                alpha, gamma, u, force_zero, reassign = warp
+                out[layer.name] = LayerSetting(
+                    k=k, t_lo=t_lo, t_hi=t_hi,
+                    alpha=float(alpha[g]), gamma=float(gamma[g]),
+                    u=u[g].copy(), force_zero=bool(force_zero[g]),
+                    reassign=bool(reassign[g]))
         return out
 
     def group_choices(self, g: int) -> tuple[int, ...]:
@@ -195,13 +238,13 @@ class Genome:
         x[: self.n_k] = [self._encode_k(int(k), g) for g in range(self.n_k)]
         if self.n_p:
             frac = 0.0 if self.prune.t_max <= 0 else t / self.prune.t_max
-            x[self.n_k :] = np.clip(frac, 0.0, 1.0)
+            x[self.n_k : self.n_k + 2 * self.n_p] = np.clip(frac, 0.0, 1.0)
         return x
 
-    def seed_population(self, pop_size, rng, mode: str = "linspace") -> np.ndarray:
+    def seed_population(self, pop_size, rng, mode: str = "logspace") -> np.ndarray:
         """Build generation 0.
 
-        `linspace` gives every individual a single K applied uniformly to all
+        `logspace` gives every individual a single K applied uniformly to all
         groups, with those K spread evenly in LOG space across the range --
         even, because the cost axis is index width log2(K), so a linear spread
         would pile most of the population into the high-K end where quality has
@@ -214,7 +257,7 @@ class Genome:
         SBX crossover and PM mutation from there; it does not need to be seeded.
 
         Groups whose ceiling is below a target K sit at their own maximum, so a
-        `linspace` individual is uniform wherever uniformity is reachable.
+        `logspace` individual is uniform wherever uniformity is reachable.
         """
         if mode == "random":
             return rng.random((pop_size, self.n_var))
@@ -232,7 +275,7 @@ class Genome:
                                   rng.random((n_rand, self.n_var))])
             return np.array(seeds)[:pop_size]
 
-        if mode != "linspace":
+        if mode != "logspace":
             raise ValueError(f"unknown init mode: {mode}")
 
         # Even in log2(K), i.e. even in index bits.
@@ -247,7 +290,7 @@ class Genome:
             ts = np.linspace(0.0, self.prune.t_max, pop_size)
             for i, t in enumerate(ts):
                 frac = 0.0 if self.prune.t_max <= 0 else t / self.prune.t_max
-                pop[i, self.n_k:] = np.clip(frac, 0.0, 1.0)
+                pop[i, self.n_k : self.n_k + 2 * self.n_p] = np.clip(frac, 0.0, 1.0)
         return pop
 
     # -- reporting --------------------------------------------------------
@@ -262,6 +305,10 @@ class Genome:
             lines.append(f"  pruning groups   : {self.n_p} x 2 vars")
         else:
             lines.append("  pruning          : disabled")
+        if self.companding:
+            lines.append(f"  companding warp  : {self.n_w} groups x "
+                         f"{self.warp_dim} vars (alpha, gamma, "
+                         f"{self.warp_m} residual, 2 flags)")
         if self.k_encoding == "integer":
             lines.append(f"  K encoding       : integer, log-spaced in "
                          f"[{self.k_min}, {self.k_max}] "
