@@ -1,0 +1,232 @@
+# GPT-2 + wte, weight sharing + PRUNING, bitmap-priced -- block-wise K (13 K + 2 prune = 15 vars)
+#
+# One of six configs that add the tied token-embedding matrix to the compressed
+# target set. Three groupings x {weight sharing, weight sharing + pruning}:
+#
+#   gpt2_k_{global,block,layer}_wte.yaml                     K only
+#   gpt2_k_{global,block,layer}_wte_prune_bitmap_2obj.yaml   K + pruning
+#
+# Paired with gpt2_k_block_prune_bitmap_2obj.yaml, which differs in exactly one
+# line (model.exclude_patterns) plus n_gen.
+#
+# -- WHAT CHANGED AND WHY IT IS ONE LINE --------------------------------------
+#
+# `model.exclude_patterns` drops "lm_head". That single string is the whole
+# change, and the reason is worth stating because the obvious edit does nothing.
+#
+# discover_targets() filters on MODULE TYPE before it ever looks at the pattern
+# list (models.py:104, `isinstance(mod, linear_types)`). transformer.wte is an
+# nn.Embedding, so it is invisible to the search no matter what the exclusion
+# list says -- removing "wte" or "embed" from the list is a no-op on GPT-2.
+#
+# But GPT-2 TIES its head to its embedding, so lm_head is an
+# nn.Linear(768, 50257, bias=False) whose .weight IS transformer.wte.weight,
+# the same Parameter object. It passes the type check and is excluded only by
+# the string. Delete the string and the 38.6M-weight embedding enters the target
+# set through the head, and because MasterWeights.write copies in place into the
+# shared tensor, compressing it via lm_head compresses the input embedding
+# lookup at the same time. count_untouched_weights already counts tied weights
+# once (models.py:136), so the accounting stays correct with no code change.
+#
+# -- WHAT IT DOES TO THE ACCOUNTING -------------------------------------------
+#
+#                       before          after
+#   target layers          48             49
+#   target weights     84,934,656    123,532,032   (+45.4%)
+#   untouched          39,505,152        907,776   (wpe + biases + norms)
+#   untouched share        31.7%          0.73%
+#   CR ceiling             3.15x           137x
+#
+# The old runs had a HARD CEILING of 3.15x that no genome could reach past. That
+# ceiling was the fp16 embedding, not the method.
+#
+# -- WHY BITMAP, UNCHANGED FROM THE ng100 RERUN -------------------------------
+#
+# `dense` charges one index per weight POSITION, so a pruned weight costs what a
+# live one does and the size objective is blind to sparsity. `bitmap` stores one
+# bit per position saying alive or dead, then one index per SURVIVOR:
+#
+#   bits = n  +  ceil(log2(K-1)) * n_alive  +  G * (K-1) * b_cb
+#
+# The mask is a flat 1 bit/weight, so pruning only pays above
+#
+#   sparsity > 1 / ceil(log2 K)
+#
+# which COUPLES K and the pruning band: prune hard only where K is large enough
+# to pay for the mask, and at K=2 never prune at all. Expect sparsity and K to
+# come out positively correlated, the reverse of the dense runs.
+#
+# -- WHAT PRUNING THE EMBEDDING MEANS -----------------------------------------
+#
+# New territory relative to every previous run. `mode: sigma` sets the band in
+# units of the per-output-row std, and MasterWeights computes row_scale over
+# lm_head's [50257, 768] as a PER-TOKEN std. So a token whose embedding vector
+# has small spread gets a proportionally narrow band. That is the right
+# normalization (it does not preferentially delete rare tokens with small-norm
+# embeddings), but it has never been exercised, so check the per-layer sparsity
+# in results.csv rather than assuming the model-wide figure applies to lm_head.
+#
+# `prune_grouping: global` gives ONE band to all 49 targets, so lm_head is
+# forced to the same threshold as every projection. Kept global so that
+# k_grouping stays the only thing varying across the sweep, but it is the most
+# obvious follow-up: the embedding plausibly tolerates a very different sparsity
+# from the projections, and this encoding cannot say so.
+#
+# -- READ cr_deploy, NOT avg_bits_target ---------------------------------------
+#
+# avg_bits_target moves much less than CR does; the whole effect of adding a 38.6M
+# tensor lands on the ratio. cr_deploy is in report_metrics below for that
+# reason. It must NOT be made an objective: untouched is now only 14.5 Mbits, so
+# it is a near-monotone transform of avg_bits_target and check_redundancy would
+# rightly flag the pair. Objectives stay PPL + AVG_BITS.
+#
+# -- THIS CONFIG SPECIFICALLY -------------------------------------------------
+#
+# 15 variables: 13 K + 2 pruning. lm_head sits outside the decoder stack, so
+# _BLOCK_RE does not match its name and TargetLayer.block is -1; _group_key then
+# puts it in its own group "b-1", appended after b0..b11 because named_modules()
+# yields the transformer subtree before the head. So the head gets a K of its
+# own here, which the global config cannot express.
+#
+# That is the interesting variable to watch. Head quantization is more sensitive
+# than projection quantization -- it produces logits directly, with no
+# downstream layer to absorb the error -- so expect the front to assign lm_head
+# a HIGHER K than the blocks. If it does, that asymmetric assignment is a result
+# in its own right: it is exactly what a uniform-K baseline cannot represent.
+#
+# One caution on search dynamics. lm_head is 38.6M of 123.5M target weights, so
+# a single gene now governs 31% of avg_bits_target while the other 12 K genes split
+# 69% at 5.7% each -- roughly 5.4x the leverage of any block gene. init:
+# logspace does not sweep it independently (encode_uniform sets every group to
+# the same K), so its exploration comes entirely from SBX/PM. mutation_prob_var
+# is pinned at 1.0 below rather than left null: the pymoo default of
+# min(0.5, 1/n_var) would touch this gene on only 6.7% of mutations.
+#
+# -- RUNTIME ------------------------------------------------------------------
+#
+# Pruning disables the reconstruction cache outright (LayerPrecompute is
+# constructed with enabled=not prune.enabled), so every one of the 100,000
+# evaluations recompresses all 123.5M target weights. Budget accordingly and
+# rely on checkpoint_every: 10 for resume.
+
+# ---------------------------------------------------------------------------
+# MATCHED PRUNE GROUPING VARIANT of gpt2_k_block_wte_prune_bitmap_2obj.yaml.
+#
+# Sibling has prune_grouping: global (1 shared pruning band, 2 genes, for
+# ANY k_grouping) -- deliberately, so k_grouping is the only thing varying
+# across that comparison. THIS file instead sets prune_grouping to the SAME
+# value as k_grouping (block), so every K-group gets its own
+# independent pruning band. That is no longer a clean single-variable
+# ablation: both K granularity and pruning granularity change together.
+#
+# This config's target set is not the plain 48-layer one (wte/lm_head or a
+# scope variant changes which layers exist and how many K-groups result), so
+# the exact new variable count isn't hard-coded here -- load the config and
+# check Genome.n_var before committing GPU time; it will be roughly 3x the
+# sibling's K+prune variable count at block granularity, or higher at layer.
+# ---------------------------------------------------------------------------
+
+model:
+  name: gpt2
+  dtype: float16
+  device: cuda
+  master_device: cuda
+  # <-- THE LINE THAT ADDS wte. "lm_head" removed; "embed"/"wte"/"wpe" are inert
+  # on GPT-2 (both are nn.Embedding) but kept to document the intent.
+  exclude_patterns: [embed, wte, wpe]
+
+quant:
+  granularity: per_tensor
+  binning: uniform
+  k_encoding: integer
+  k_min: 2
+  k_max: 8192
+  k_choices: [2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192]
+  codebook_bits: 16
+  deployable_format: bitmap  # <-- THE LINE THAT MAKES PRUNING COUNT
+  csr_span_bits: 4           # unused while deployable_format is bitmap
+  cache_entries: 32          # irrelevant: pruning disables the cache entirely
+
+prune:
+  enabled: true
+  mode: sigma                # threshold = t x per-output-row std
+  # Sigma to sparsity on a roughly Gaussian layer:
+  #   t=0.25 -> 19.7%   t=1.00 -> 68.3%   t=1.64 -> 89.9%
+  #   t=0.50 -> 38.3%   t=1.28 -> 79.9%   t=2.00 -> 95.4%
+  t_max: 2.0
+  reserve_zero_codeword: true
+
+variables:
+  k_grouping: block                         # <-- THE ONLY LINE THAT DIFFERS across the sweep
+  # One threshold for the whole model, incl. lm_head. See the header.
+  prune_grouping: block  # matched to k_grouping (was global) -- see the banner note above
+
+data:
+  calib_dataset: c4
+  eval_dataset: wikitext2
+  seqlen: 1024
+  n_proxy_seq: 8
+  n_eval_seq: 128
+
+search:
+  algorithm: nsga2
+  pop_size: 100
+  n_gen: 1000
+  seed: 0
+
+  objectives: [ppl_proxy, avg_bits_target]
+  # cr_deploy is where adding wte is visible; sparsity is the pruning knob.
+  # Both reported per generation, neither optimized.
+  report_metrics: [cr_deploy, sparsity]
+
+  init: logspace
+  warm_start: true
+  baseline_sweep: true       # 13 fixed-K points at t=0, now incl. lm_head
+  size_objective: avg_bits_target
+
+  crossover_prob: 0.9
+  crossover_prob_var: 1.0
+  crossover_eta: 15
+  mutation_prob: 1.0         # 0.9 in the global config
+  mutation_prob_var: 1.0     # per gene; null would give min(0.5, 1/15) = 6.7%
+  mutation_eta: 20
+  eliminate_duplicates: true
+  n_offsprings: null
+  ref_dir_partitions: null
+  moead_neighbors: 15
+  moead_prob_neighbor_mating: 0.7
+
+log:
+  root: logs
+  run_name: gpt2-k-block-wte-prune-bitmap-2obj-matchprune-np100-ng1000
+  checkpoint_every: 10
+  save_history: true
+
+plot:
+  enabled: true
+  # 10, not 1. At n_gen 1000 a per-generation frame would write 2,000 files and
+  # a 167-second video; every 10 gives the same 100 frames the ng100 runs
+  # produced, so the videos stay comparable and the I/O stays sane.
+  every: 10
+  formats: [png, pdf]
+  dpi: 150
+  style: paper
+  yscale: log
+  ylim_min: 1.0              # perplexity floor, exp(cross-entropy) >= 1
+  ylim_min_ratio: 0.8
+  ylim_pad: 0.03
+  ylim_max: null
+  ylim_max_ratio: null
+  # BITMAP floor: the mask is 1 bit per weight and cannot be avoided, so
+  # avg_bits_target >= 1.0. Pinned because the baseline sweep runs at zero sparsity
+  # and bottoms out at 2.0, which would clip every heavily pruned candidate.
+  xlim_min: 1.0
+  xlim_max: null
+  legend_alpha: 0.3
+  marker_pt: 3.5
+  baseline_label: exponential search (baseline)
+  annotation_pt: null
+  venue: ieee
+  width: column
+  video: [mp4, gif]
+  video_fps: 6

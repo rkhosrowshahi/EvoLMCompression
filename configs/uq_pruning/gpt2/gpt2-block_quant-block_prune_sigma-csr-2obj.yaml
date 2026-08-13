@@ -1,0 +1,226 @@
+# GPT-2, weight sharing + PRUNING, CSR costing -- block-wise K (12 K + 2 prune = 14 vars)
+#
+# The rerun. Six configs, three groupings x {2, 3} objectives, all with pruning
+# on and all priced under the CSR format. Paired one-for-one with the
+# *_bitmap_* configs, which differ ONLY in the storage format, so the pair
+# answers: which representation reaches a smaller model?
+#
+#   gpt2_k_{global,block,layer}_prune_csr_2obj.yaml   PPL + AVG_BITS
+#   gpt2_k_{global,block,layer}_prune_csr_3obj.yaml   PPL + AVG_BITS + ACR
+#
+# -- WHY THIS RERUN EXISTS ----------------------------------------------------
+#
+# The earlier pruned runs were priced under `dense`, which charges one index per
+# weight POSITION. A pruned weight cost exactly what a live one did, so the size
+# objective was blind to sparsity: candidates spanning 0.000 to 0.953 sparsity
+# at the same avg_bits had cr_deploy identical to SIX DECIMALS.
+#
+# The consequence was not a bad search, it was a bad question. Perplexity saw
+# the full damage of pruning (at 8 avg_bits, 58 -> 3723 as sparsity rose), the size
+# objective saw nothing, and the archival objective saw +21%. NSGA-II was shown
+# a knob that costs a great deal and returns almost nothing, so it correctly
+# turned the knob down: median front sparsity came out at 0.13 to 0.29.
+#
+# `deployable_format: bitmap` fixes that. One bit per position records alive or
+# dead, then one index per SURVIVOR:
+#
+#   bits = n  +  ceil(log2(K-1)) * n_alive  +  G * (K-1) * b_cb
+#
+# -- THE COUPLING THIS CREATES ------------------------------------------------
+#
+# The mask is a flat 1 bit/weight, so pruning only pays above
+#
+#   (ceil(log2(K-1)) + span) * n_alive  <  ceil(log2 K) * n
+#
+# i.e. roughly sparsity > span/(idx+span). There is no mask, so the gap field
+# is the whole overhead and it is charged per SURVIVOR rather than per
+# position -- which is why CSR keeps improving where bitmap flattens out.
+#
+# So K and the pruning band are COUPLED under this cost, which they were not
+# under dense: prune hard only where K is large enough to pay for the mask, and
+# at K=2 (1 index bit) never prune, since break-even would need sparsity > 1.
+# Expect sparsity and K to come out positively correlated. The dense runs showed
+# the opposite (rho = -0.59 at global), and that reversal is a result to report.
+#
+# Conveniently, `init: logspace` already sweeps K and t together along one
+# diagonal -- low K with no pruning, high K with heavy pruning -- which is
+# exactly the direction the break-even rule favors. Under dense that diagonal
+# was an awkward artifact; here it is aligned with where pruning pays.
+#
+# -- OBJECTIVES ---------------------------------------------------------------
+#
+# PPL  proxy perplexity                                            (min)
+# AVG_BITS  bits per weight, target matrices, BITMAP-priced             (min)
+#
+# The paired *_3obj config adds ACR (archival CR, whole checkpoint, MAX). Both
+# are run because the evidence is genuinely mixed and the pair settles it:
+#
+#   * rho(AVG_BITS, ACR) RISES from 0.970 to 0.986 once AVG_BITS is sparsity-aware --
+#     both now respond to the same knob, so ACR looks MORE redundant, not less.
+#   * but the conditional screen leaves 6-11% ACR spread among the best-
+#     perplexity half at matched size, against 1.8-6.3% in the unpruned case.
+#   * and rho(ACR, perplexity) is +0.7 to +0.99, so that spread is bought by
+#     accepting worse quality at the same deployable size.
+#
+# The 2-objective run is the control. If the 3-objective front is not better on
+# (PPL, AVG_BITS) after projection, ACR is costing hypervolume for members that are
+# dominated on the axes that matter, exactly as it did without pruning.
+#
+# -- THE PLOT BOX, WHICH BITMAP BREAKS IF LEFT ALONE --------------------------
+#
+# The baseline sweep evaluates uniform-K points at t=0, i.e. ZERO sparsity, so
+# under bitmap its cheapest point is K=2 at 2.0 avg_bits (1 mask bit + 1 index bit).
+# Pruned candidates go far below that -- K=2 at 95% sparsity costs 1.045 avg_bits.
+# A frozen x box derived from the baselines alone would clip every heavily
+# pruned candidate onto the spine, which is exactly the region of interest.
+#
+# `xlim_min: 1.0` pins it at the hard floor instead: the mask is one bit per
+# weight and cannot be avoided, so avg_bits_target >= 1.0 under bitmap, the same way
+# perplexity >= 1.0. Both bounds are theoretical, not fitted.
+
+# ---------------------------------------------------------------------------
+# MATCHED PRUNE GROUPING VARIANT of gpt2_k_block_prune_csr_2obj.yaml.
+#
+# Sibling has prune_grouping: global (1 shared pruning band, 2 genes, for
+# ANY k_grouping) -- deliberately, so k_grouping is the only thing varying
+# across that file's sweep. THIS file instead sets prune_grouping to the
+# SAME value as k_grouping (block), so every K-group gets its own
+# independent pruning band. That is no longer a clean single-variable
+# ablation: both K granularity and pruning granularity change together.
+#
+# Variable count: 12 K-groups. Sibling has 12 K-vars + 2
+# prune vars = 14. This file has 12 K-vars +
+# 24 prune vars (12 groups x 2) = 36
+# (+22 vs the sibling).
+# ---------------------------------------------------------------------------
+
+model:
+  name: gpt2
+  dtype: float16
+  device: cuda
+  master_device: cuda
+
+quant:
+  granularity: per_tensor
+  binning: uniform
+  k_encoding: integer
+  k_min: 2
+  k_max: 8192
+  k_choices: [2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192]
+  codebook_bits: 16
+  # <-- CSR instead of BITMAP. Both store only survivors; they differ in how
+  # the POSITION of each survivor is recorded:
+  #
+  #   bitmap  1 bit per ORIGINAL position saying alive or dead
+  #   csr     a gap field per SURVIVOR, counting from the previous one
+  #
+  # That is the whole difference, and it decides the floor. Bitmap pays its
+  # mask whatever the sparsity, so it can never go below 1.0 avg_bits. CSR charges
+  # nothing for a pruned weight and has no floor at all -- measured on one
+  # GPT-2 layer at 99.7% sparsity, bitmap 1.024 avg_bits against CSR 0.057.
+  #
+  # The crossover is around 87% sparsity. Below it bitmap wins, because CSR
+  # pays a gap field on every survivor and at low sparsity there are many.
+  deployable_format: csr
+  # null picks the gap width PER LAYER from codec.CSR_SPANS. The optimum tracks
+  # sparsity -- 4 bits near 80%, 6 at 90-95%, 8 at 98% -- so a fixed value
+  # would handicap CSR at exactly the sparsities where it beats bitmap, and
+  # this run would measure one arbitrary width rather than the format.
+  #
+  # It is NOT a decision variable: given a layer's sparsity and index width the
+  # best span is a closed form, so it is computed at pricing time and recorded
+  # in a 6-bit tag. Searching for it would spend 48 variables rediscovering
+  # arithmetic.
+  csr_span_bits: null
+  cache_entries: 32          # irrelevant: pruning disables the cache entirely
+
+prune:
+  enabled: true
+  mode: sigma                # threshold = t x per-output-row std
+  # Sigma to sparsity on a roughly Gaussian layer:
+  #   t=0.25 -> 19.7%   t=1.00 -> 68.3%   t=1.64 -> 89.9%
+  #   t=0.50 -> 38.3%   t=1.28 -> 79.9%   t=2.00 -> 95.4%
+  # Kept at 2.0 because bitmap finally rewards the high-sparsity end, which the
+  # dense runs had no reason to visit.
+  t_max: 2.0
+  # Still true, and still the reason pruning is invisible to the INDEX WIDTH:
+  # the reserved zero codeword keeps it at ceil(log2 K). Under bitmap the mask
+  # carries the zeros instead, so survivors share K-1 centroids and the saving
+  # lands where it should.
+  reserve_zero_codeword: true
+
+variables:
+  k_grouping: block                         # <-- THE ONLY LINE THAT DIFFERS across the sweep
+  # One threshold for the whole model, so k_grouping stays the only thing that
+  # varies. This is also why per-layer format selection was worthless: sparsity
+  # comes out near-uniform, so every layer wants the same format. Moving this to
+  # `block` is the most promising follow-up, at +24 variables.
+  prune_grouping: block  # matched to k_grouping (was global) -- see the banner note above
+
+data:
+  calib_dataset: c4
+  eval_dataset: wikitext2
+  seqlen: 1024
+  n_proxy_seq: 8
+  n_eval_seq: 128
+
+search:
+  algorithm: nsga2
+  pop_size: 100
+  n_gen: 100
+  seed: 0
+
+  # PPL + AVG_BITS. The paired _3obj config appends cr_archive.
+  objectives: [ppl_proxy, avg_bits_target]
+
+  init: logspace
+  warm_start: true
+  baseline_sweep: true       # 13 fixed-K reference points, all at t=0
+  size_objective: avg_bits_target
+
+  crossover_prob: 0.9
+  crossover_prob_var: 1.0
+  crossover_eta: 15
+  mutation_prob: 1.0         # 0.9 in the global config
+  mutation_prob_var: 1.0
+  mutation_eta: 20
+  eliminate_duplicates: true
+  n_offsprings: null
+  ref_dir_partitions: null
+  moead_neighbors: 15
+  moead_prob_neighbor_mating: 0.7
+
+log:
+  root: logs
+  run_name: gpt2-k-block-prune-csr-2obj-matchprune-np100-ng100
+  checkpoint_every: 10
+  save_history: true
+
+plot:
+  enabled: true
+  every: 1
+  formats: [png, pdf]
+  dpi: 150
+  style: paper
+  yscale: log
+  ylim_min: 1.0              # perplexity floor, exp(cross-entropy) >= 1
+  ylim_min_ratio: 0.8        # unused while ylim_min is set
+  ylim_pad: 0.03
+  ylim_max: null
+  ylim_max_ratio: null
+  # CSR has NO floor -- it charges only survivors, and a heavily pruned
+  # candidate reaches 0.036 avg_bits. Both bounds are pinned because the baseline
+  # sweep is at zero sparsity, which is CSR's worst case: every weight survives
+  # and pays a gap field, so the references land at 3 to 15 avg_bits and a box
+  # derived from them would put the entire interesting region off-scale.
+  # 16.0 is fp16, a natural right edge.
+  xlim_min: 0.0
+  xlim_max: 16.0
+  legend_alpha: 0.3
+  marker_pt: 3.5
+  baseline_label: exponential search (baseline)
+  annotation_pt: null
+  venue: ieee
+  width: column
+  video: [mp4, gif]
+  video_fps: 6

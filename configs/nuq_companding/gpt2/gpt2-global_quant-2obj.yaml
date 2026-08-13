@@ -1,0 +1,142 @@
+# GPT-2 companding sweep -- Global K (11 variables)
+#
+# Paired with configs/uq/gpt2/gpt2_k_global.yaml,
+# which this file is byte-for-byte identical to except quant.binning, the
+# companding_* block below, and log.run_name -- so any difference in the two
+# fronts is attributable to the binning method alone, holding K encoding,
+# granularity, grouping, operators and objectives fixed.
+#
+# Idea 1 (companding / warp quantization): instead of evolving K levels
+# directly, evolve a monotone warp F per K-group and quantize as
+# round_uniform(F(x)), reconstructed with the same bin-mean centroid every
+# other binning mode uses. K stays an ordinary integer gene, decoupled from
+# the warp's own gene count -- see evolmc/quantize.py and evolmc/grouping.py.
+#
+#   gpt2_global.yaml   1 K var   x 10 warp genes = 11 variables (+2 if pruned)
+#   gpt2_block.yaml    12 K vars x 10 warp genes = 132 variables (+2 if pruned)
+#   gpt2_layer.yaml    48 K vars x 10 warp genes = 528 variables (+2 if pruned)
+#
+# Search space: any INTEGER K in [2, 8192] per K-group, no pruning,
+# plus the 10-gene warp per K-group (see the companding_* block below).
+
+# NOTE: 11-13 variables is a comfortable size for NSGA-II at pop 100 --
+# no different from the uniform global sibling's 1-3 variables in that
+# respect. The companding-specific question here is narrower than at block
+# or layer granularity: with one shared K and one shared warp for the whole
+# model, does shaping the codebook's density beat spending the same K on a
+# uniform grid? Compare against gpt2_k_global.yaml at matched avg_bits_target.
+
+model:
+  name: gpt2
+  dtype: float16
+  device: cuda
+  master_device: cuda
+
+quant:
+  granularity: per_tensor    # matched to the uniform sibling
+  binning: companding        # idea 1 -- the only line that differs, plus the block below
+  k_encoding: integer
+  k_min: 2
+  k_max: 8192
+  k_choices: [2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192]
+  codebook_bits: 16
+  # Companding cache keys include (alpha, gamma, u, flags), so unlike the
+  # uniform (layer, K) cache the hit rate is near zero once the warp genes
+  # start varying. Left at the sibling's value so the diff stays small; it
+  # does not cost more since the cache just fills with (almost) never-reused
+  # entries either way.
+  cache_entries: 32
+  # -- companding / warp quantization (idea 1) -----------------------------
+  # F = F_residual o F_gamma, quantized as round_uniform(F(x)) and
+  # reconstructed with the same bin-mean centroid every binning mode uses
+  # (see evolmc/quantize.py:_companding_forward). F_gamma is an analytic
+  # density-matched backbone estimated per codebook group from its own
+  # histogram (lambda(x) ~ p(x)^gamma; 0 = uniform, 1/3 = MSE-optimal
+  # Panter-Dite, 1 = equal-probability bins). F_residual is a monotone
+  # piecewise-linear correction on top, genome-controlled alongside gamma
+  # and the clip threshold alpha -- see evolmc/grouping.py.
+  #
+  # Warp params are shared with the K group (evolmc/grouping.py: Genome
+  # reuses k_groups for the warp), so each K variable above brings 10 more
+  # genes: alpha, gamma, 6 residual slopes, 2 flags (force_zero, reassign).
+  companding_alpha_min: 2.0   # clip threshold, in units of group std
+  companding_alpha_max: 6.0
+  companding_gamma_min: 0.0   # 0 -> uniform backbone
+  companding_gamma_max: 1.0   # 1 -> equal-probability bins
+  companding_residual_genes: 6   # M piecewise-linear segments (genome)
+  companding_grid: 256           # histogram / backbone resolution
+  companding_reassign_iters: 3   # Lloyd passes when the reassign flag fires
+
+prune:
+  enabled: false             # this sweep isolates binning, matching the uniform sibling
+
+variables:
+  k_grouping: global
+  prune_grouping: global     # unused while prune.enabled is false
+
+data:
+  calib_dataset: c4
+  eval_dataset: wikitext2
+  seqlen: 1024               # GPT-2's context window
+  n_proxy_seq: 8             # fitness signal during the search
+  n_eval_seq: 128             # full evaluation of the final front
+
+search:
+  algorithm: nsga2
+  pop_size: 100
+  n_gen: 100
+  seed: 0
+  # Generation 0 sweeps K only, matching the uniform sibling's logspace seed;
+  # the warp genes start at the identity-warp baseline (alpha_min, gamma=0,
+  # zero residual, both flags off -- see grouping.py's zero-genome decode),
+  # so gen 0 differs from the uniform baseline curve only in the (inert)
+  # warp segment, not in what K itself does.
+  init: logspace
+  warm_start: true
+  baseline_sweep: true       # the 13 fixed-K reference points
+  size_objective: avg_bits_target
+
+  # -- NSGA-II operator controls ---------------------------------------------
+  # Matched to gpt2_k_global.yaml so the pair isolates
+  # binning alone -- except mutation_prob_var, deliberately lowered to 0.2:
+  # at 11 variables (10 warp genes per K-group), the default 1.0 mutates
+  # nearly every gene of nearly every offspring, which is too disruptive a
+  # step size once the genome is this wide.
+  crossover_prob: 0.9        # per mating pair
+  crossover_prob_var: 1.0    # per gene, given the pair crosses
+  crossover_eta: 15          # SBX spread; higher = children hug their parents
+  mutation_prob: 0.9         # per individual
+  mutation_prob_var: 0.2     # per gene; lowered from the uniform sibling's 1.0 -- see above
+  mutation_eta: 20           # PM spread; higher = smaller steps
+  eliminate_duplicates: true
+  n_offsprings: null         # null -> pop_size (generational)
+  ref_dir_partitions: null   # unsga3/moead only; null -> pop_size - 1
+  moead_neighbors: 15
+  moead_prob_neighbor_mating: 0.7
+
+log:
+  root: logs
+  run_name: gpt2-companding-global-np100-ng100
+  checkpoint_every: 10
+  save_history: true
+
+plot:
+  enabled: true
+  every: 1
+  formats: [png, pdf]
+  dpi: 150
+  style: paper
+  yscale: log
+  ylim_min: 1.0
+  ylim_min_ratio: 0.8      # unused while ylim_min is set
+  ylim_pad: 0.03            # breathing room at both ends, in decades
+  ylim_max: null
+  ylim_max_ratio: null
+  legend_alpha: 0.3
+  marker_pt: 3.5             # front/baseline marker diameter (pt)
+  baseline_label: exponential search (baseline)
+  annotation_pt: null        # null -> base font - 3 (5pt at the ieee preset)
+  venue: ieee                # 3.5 in column figures, Times
+  width: column
+  video: [mp4, gif]
+  video_fps: 6

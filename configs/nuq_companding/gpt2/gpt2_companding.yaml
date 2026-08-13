@@ -1,0 +1,126 @@
+# GPT-2 companding / warp quantization -- idea 1 of the non-uniform
+# quantization notes.
+#
+# Instead of evolving levels directly (a K-length codebook), this config
+# evolves a monotone warp F per K-group and quantizes as
+#     q = round_uniform(F(x))
+# reconstructed with the same bin-mean centroid every binning mode already
+# uses (see evolmc/quantize.py:_companding_forward). F is backbone (an
+# analytic density-matched exponent gamma, the Bennett/Panter-Dite family)
+# composed with a residual monotone piecewise-linear correction -- both
+# genome-controlled. K stays an ordinary integer gene, decoupled from the
+# warp's own gene count, so 3-bit and 8-bit solutions compete on one front
+# exactly as they do under `binning: uniform`.
+#
+# Same granularity, K ladder and pruning setting as dev_gpt2.yaml so a run
+# here is a direct A/B against `binning: uniform` -- change binning back to
+# compare.
+#
+# Companding-only knobs, all under `quant`:
+#   companding_alpha_min/max     clip threshold, in units of each codebook
+#                                group's own std. Wider = fewer weights
+#                                clipped, narrower = more resolution near 0.
+#   companding_gamma_min/max     backbone density exponent lambda ~ p(x)^gamma
+#                                0 = uniform, 1/3 = MSE-optimal (Panter-Dite),
+#                                1 = equal-probability bins (max entropy).
+#   companding_residual_genes    M piecewise-linear segments layered on top
+#                                of the backbone (the "u" genes below).
+#   companding_grid              histogram resolution the backbone is
+#                                estimated from; higher = finer but slower.
+#   companding_reassign_iters    Lloyd passes run when a group's `reassign`
+#                                flag gene fires (nearest-centroid cleanup
+#                                after the warp bins are cut).
+#
+# Per K-group variable count is 2 (K, itself already existed) + 10 warp genes
+# (alpha, gamma, 6 residual, 2 flags) = 12, vs. 1 gene per group under
+# `uniform`. At k_grouping: type that is 4 groups x 12 = 48 variables total
+# (44 warp + 4 K), comparable to gpt2_k_layer.yaml's 48-variable uniform
+# sweep, so the two are a fair NSGA-II budget match.
+
+model:
+  name: gpt2
+  dtype: float16
+  device: cuda
+  master_device: cuda
+
+quant:
+  granularity: per_channel   # one codebook (and one warp-fitting histogram) per output channel
+  binning: companding        # idea 1: warp + uniform binning in the warped domain
+  k_choices: [2, 4, 8, 16, 32, 64, 128, 256]
+  codebook_bits: 16
+  companding_alpha_min: 2.0
+  companding_alpha_max: 6.0
+  companding_gamma_min: 0.0
+  companding_gamma_max: 1.0
+  companding_residual_genes: 6
+  companding_grid: 256
+  companding_reassign_iters: 3
+  # Companding cache keys include (alpha, gamma, u, flags), so unlike the
+  # uniform (layer, K) cache the hit rate is near zero once the warp genes
+  # start varying -- keep this small rather than paying for full-tensor
+  # entries that are (almost) never reused.
+  cache_entries: 32
+
+prune:
+  enabled: false             # isolates the binning comparison, as in gpt2_k_layer.yaml
+
+variables:
+  k_grouping: type            # 4 vars for GPT-2 (c_attn, c_proj x2, c_fc)
+  prune_grouping: global      # unused while prune.enabled is false
+
+data:
+  calib_dataset: c4
+  eval_dataset: wikitext2
+  seqlen: 1024
+  n_proxy_seq: 8
+  n_eval_seq: 128
+
+search:
+  algorithm: nsga2
+  pop_size: 100
+  n_gen: 100
+  seed: 0
+  init: linspace              # gen 0 sweeps K only; alpha/gamma/residual start
+                               # at the identity-warp baseline (see grouping.py)
+  warm_start: true
+  baseline_sweep: true
+  size_objective: avg_bits_target
+
+  crossover_prob: 0.9
+  crossover_prob_var: 0.5
+  crossover_eta: 15
+  mutation_prob: 1.0
+  mutation_prob_var: null     # null -> 1/n_var
+  mutation_eta: 20
+  eliminate_duplicates: true
+  n_offsprings: null
+  ref_dir_partitions: null
+  moead_neighbors: 15
+  moead_prob_neighbor_mating: 0.7
+
+log:
+  root: logs
+  run_name: gpt2-companding-np100-ng100
+  checkpoint_every: 10
+  save_history: true
+
+plot:
+  enabled: true
+  every: 1
+  formats: [png, pdf]
+  dpi: 150
+  style: paper
+  yscale: log
+  ylim_min: 1.0
+  ylim_min_ratio: 0.8
+  ylim_pad: 0.03
+  ylim_max: null
+  ylim_max_ratio: null
+  legend_alpha: 0.3
+  marker_pt: 3.5
+  baseline_label: exponential search (baseline)
+  annotation_pt: null
+  venue: ieee
+  width: column
+  video: [mp4, gif]
+  video_fps: 6
