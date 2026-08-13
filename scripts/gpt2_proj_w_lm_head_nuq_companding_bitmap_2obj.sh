@@ -17,5 +17,5 @@ CONFIGS=(
 )
 
 for cfg in "${CONFIGS[@]}"; do
-  python3 scripts/run_search.py "$cfg" "$@"
+  scripts/_search_then_eval.sh "$cfg" "$@"
 done
