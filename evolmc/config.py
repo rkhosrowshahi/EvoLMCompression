@@ -46,6 +46,10 @@ _AUTO_AS_NONE = frozenset({
 # They now split across two scalars, so a stored config still loads.
 _SPLIT = {"xlim": ("xlim_min", "xlim_max"), "ylim": ("ylim_min", "ylim_max")}
 
+# Retired keys still accepted so a stored run config.yaml loads. Embeddings
+# now pass the type filter always; exclude_patterns is the only dial.
+_DROPPED = frozenset({"include_embeddings"})
+
 Granularity = Literal["per_tensor", "per_channel", "per_group"]
 Binning = Literal["uniform", "quantile", "kmeans", "companding"]
 Grouping = Literal["global", "type", "block", "block_type"]
@@ -63,21 +67,27 @@ class ModelConfig:
     # Layers matching any of these substrings are never quantized. They stay
     # fp16 and are still *counted* in the compression accounting.
     #
-    # NOTE the module TYPE filter in discover_targets runs before these
-    # patterns, so norms and biases are excluded structurally and no pattern is
-    # needed for them -- and no pattern can bring them back.
+    # Linear, Conv1D and Embedding 2-D weights are always candidates; these
+    # patterns are what keep embeddings and the LM head out of `only_proj`.
+    # Norms and biases stay fp16 unless `include_1d` is set -- no pattern can
+    # bring 1-D parameters back by itself. Tied weights are claimed once.
     exclude_patterns: tuple[str, ...] = ("lm_head", "embed", "wte", "wpe")
-    # Let nn.Embedding into the target set. Off by default, which is what every
-    # finished run assumed. On GPT-2 this is the only way to reach the
-    # positional table `wpe`; the token table `wte` is otherwise reachable
-    # through the tied `lm_head` Linear. Tied weights are claimed once.
-    include_embeddings: bool = False
+    # Let 1-D parameters (LayerNorm scale/bias, projection biases) into the
+    # target set. Off by default. Combined with an empty exclude list this is
+    # the `all` target set: every parameter in the checkpoint. Vectors are
+    # quantized as one codebook each and never pruned.
+    include_1d: bool = False
 
 
 @dataclass
 class QuantConfig:
     granularity: Granularity = "per_channel"
     group_size: int = 128  # only used when granularity == "per_group"
+    # Layer-name substrings forced to per-channel codebooks even when
+    # `granularity` is per_tensor / per_group. On GPT-2, `wte` (and `lm_head`,
+    # the same tied tensor) needs a codebook per token row; one per-tensor
+    # codebook over 38M embedding weights is too coarse.
+    per_channel_patterns: tuple[str, ...] = ()
     binning: Binning = "uniform"
     kmeans_iters: int = 12
     # How the genome maps to a codebook size.
@@ -512,6 +522,11 @@ class Config:
                     blob.setdefault(hi_name, pair[1])
 
             for key, val in blob.items():
+                if key in _DROPPED:
+                    warnings.warn(f"{cls.__name__}.{key} was removed; "
+                                  f"exclude_patterns is the dial",
+                                  DeprecationWarning, stacklevel=2)
+                    continue
                 if key in _RENAMED:
                     new = _RENAMED[key]
                     warnings.warn(f"{cls.__name__}.{key} was renamed to {new}",

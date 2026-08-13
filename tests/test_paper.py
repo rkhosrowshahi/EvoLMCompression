@@ -773,6 +773,19 @@ def test_retired_option_names_still_load_with_a_warning(old, new, value):
     assert any(old in str(w.message) and new in str(w.message) for w in caught)
 
 
+def test_dropped_include_embeddings_still_loads():
+    """Stored run configs that set the retired flag must keep loading."""
+    import warnings
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        cfg = Config.from_dict({"model": {"include_embeddings": True,
+                                          "include_1d": True}})
+    assert cfg.model.include_1d is True
+    assert not hasattr(cfg.model, "include_embeddings")
+    assert any("include_embeddings" in str(w.message) for w in caught)
+
+
 def test_retired_limit_pairs_split_into_scalars():
     """`ylim: [lo, hi]` used to carry both bounds; a stored config still loads."""
     import warnings

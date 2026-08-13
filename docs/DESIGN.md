@@ -28,11 +28,11 @@ Run a real search, then evaluate the resulting front against the fixed-bit
 baselines:
 
 ```bash
-python scripts/run_search.py configs/uq_pruning/gpt2_124m/gpt2_124m-type_quant-global_prune_sigma-bitmap-2obj.yaml
+python scripts/run_search.py configs/uq_pruning/gpt2_124m/gpt2_124m-only_proj-type_quant-global_prune_sigma-bitmap-2obj.yaml
 ```
 
 ```bash
-python scripts/run_eval.py configs/uq_pruning/gpt2_124m/gpt2_124m-type_quant-global_prune_sigma-bitmap-2obj.yaml latest
+python scripts/run_eval.py configs/uq_pruning/gpt2_124m/gpt2_124m-only_proj-type_quant-global_prune_sigma-bitmap-2obj.yaml latest
 ```
 
 ### Which corpus the figures show
@@ -275,9 +275,9 @@ Any integer K in [2, 8192], pruning off.
 
 | Config | Grouping | Variables | Search space |
 |---|---|---|---|
-| `gpt2_124m-global_quant-2obj.yaml` | `global` | 1 | 8191 |
-| `gpt2_124m-block_quant-2obj.yaml` | `block` | 12 | 8191^12 |
-| `gpt2_124m-layer_quant-2obj.yaml` | `block_type` | 48 | 8191^48 |
+| `gpt2_124m-only_proj-global_quant-2obj.yaml` | `global` | 1 | 8191 |
+| `gpt2_124m-only_proj-block_quant-2obj.yaml` | `block` | 12 | 8191^12 |
+| `gpt2_124m-only_proj-layer_quant-2obj.yaml` | `block_type` | 48 | 8191^48 |
 
 ```bash
 bash scripts/gpt2_granularity.sh

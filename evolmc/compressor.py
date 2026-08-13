@@ -14,7 +14,7 @@ import numpy as np
 import torch
 
 from .codec import ModelCost, price_layer
-from .grouping import Genome
+from .grouping import Genome, layer_granularity
 from .models import (
     MasterWeights,
     count_untouched_weights,
@@ -42,7 +42,7 @@ class Compressor:
 
         self.targets = discover_targets(
             model, cfg.model.exclude_patterns,
-            include_embeddings=getattr(cfg.model, 'include_embeddings', False))
+            include_1d=getattr(cfg.model, "include_1d", False))
         self.n_untouched = count_untouched_weights(model, self.targets)
         self.master = MasterWeights(self.targets, cfg.model.master_device)
         self.genome = Genome(self.targets, cfg.quant, cfg.prune, cfg.variables)
@@ -77,12 +77,17 @@ class Compressor:
         companding = self.cfg.quant.binning == "companding"
         for layer in self.targets:
             s = settings[layer.name]
+            # 1-D norms/biases are quantized but never pruned: zeroing a
+            # LayerNorm scale or a bias is almost always fatal, and Wanda has
+            # no input-feature score for a vector.
+            t_lo = 0.0 if layer.is_vector else s.t_lo
+            t_hi = 0.0 if layer.is_vector else s.t_hi
             extra = None
             if companding:
                 extra = (round(s.alpha, 6), round(s.gamma, 6),
                          tuple(round(float(v), 6) for v in s.u),
                          s.force_zero, s.reassign)
-            key = self.cache.key(layer.name, s.k, s.t_lo, s.t_hi, extra)
+            key = self.cache.key(layer.name, s.k, t_lo, t_hi, extra)
             hit = self.cache.get(key)
             if hit is not None:
                 recon, stats = hit
@@ -91,8 +96,8 @@ class Compressor:
                     self.master.original(layer),
                     self.master.row_scale(layer),
                     k=s.k,
-                    t_lo=s.t_lo,
-                    t_hi=s.t_hi,
+                    t_lo=t_lo,
+                    t_hi=t_hi,
                     quant_cfg=self.cfg.quant,
                     prune_cfg=self.cfg.prune,
                     name=layer.name,
@@ -159,9 +164,10 @@ class Compressor:
 
 
 def _n_groups(layer, quant_cfg) -> int:
-    if quant_cfg.granularity == "per_tensor":
+    gran = layer_granularity(layer.name, quant_cfg)
+    if gran == "per_tensor":
         return 1
-    if quant_cfg.granularity == "per_channel":
+    if gran == "per_channel":
         return layer.out_features
     return layer.out_features * (layer.in_features // quant_cfg.group_size)
 

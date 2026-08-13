@@ -1,0 +1,91 @@
+model:
+  name: gpt2
+  dtype: float16
+  device: cuda
+  master_device: cuda
+  exclude_patterns: []
+  include_1d: true
+
+quant:
+  granularity: per_tensor
+  per_channel_patterns: [wte]
+  binning: uniform
+  k_encoding: integer
+  k_min: 2
+  k_max: 8192
+  k_choices: [2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192]
+  codebook_bits: 16
+  deployable_format: csr
+  csr_span_bits: null
+  cache_entries: 32
+
+prune:
+  enabled: true
+  mode: sigma
+  t_max: 2.0
+  reserve_zero_codeword: true
+
+variables:
+  k_grouping: block
+  prune_grouping: block
+
+data:
+  calib_dataset: c4
+  eval_dataset: wikitext2
+  seqlen: 1024
+  n_proxy_seq: 8
+  n_eval_seq: 128
+
+search:
+  algorithm: nsga2
+  pop_size: 100
+  n_gen: 100
+  seed: 0
+
+  objectives: [ppl_proxy, avg_bits]
+
+  init: logspace
+  warm_start: true
+  baseline_sweep: true
+  size_objective: avg_bits
+
+  crossover_prob: 0.9
+  crossover_prob_var: 1.0
+  crossover_eta: 15
+  mutation_prob: 1.0
+  mutation_prob_var: 0.2
+  mutation_eta: 20
+  eliminate_duplicates: true
+  n_offsprings: null
+  ref_dir_partitions: null
+  moead_neighbors: 15
+  moead_prob_neighbor_mating: 0.7
+
+log:
+  root: logs
+  run_name: gpt2_124m-all-block_quant-block_prune_sigma-csr-2obj-np100-ng100
+  checkpoint_every: 10
+  save_history: true
+
+plot:
+  enabled: true
+  every: 1
+  formats: [png, pdf]
+  dpi: 150
+  style: paper
+  yscale: log
+  ylim_min: 1.0
+  ylim_min_ratio: 0.8
+  ylim_pad: 0.03
+  ylim_max: null
+  ylim_max_ratio: null
+  xlim_min: 0.0
+  xlim_max: 16.0
+  legend_alpha: 0.3
+  marker_pt: 3.5
+  baseline_label: exponential search (baseline)
+  annotation_pt: null
+  venue: ieee
+  width: column
+  video: [mp4, gif]
+  video_fps: 6

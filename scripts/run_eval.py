@@ -12,8 +12,8 @@ windows. The gap between the two curves is the honest statement of how much of
 the front survives, and the Spearman correlation says whether the cheap proxy
 ranked candidates the way the full metric does at all.
 
-    python scripts/run_eval.py configs/uq/gpt2_124m/gpt2_124m-layer_quant-2obj.yaml logs/gpt2_124m-layer_quant-2obj-np100-ng100
-    python scripts/run_eval.py configs/uq/gpt2_124m/gpt2_124m-layer_quant-2obj.yaml logs/gpt2_124m-layer_quant-2obj-np100-ng100 --skip-baselines
+    python scripts/run_eval.py configs/uq/gpt2_124m/gpt2_124m-only_proj-layer_quant-2obj.yaml logs/gpt2_124m-only_proj-layer_quant-2obj-np100-ng100
+    python scripts/run_eval.py configs/uq/gpt2_124m/gpt2_124m-only_proj-layer_quant-2obj.yaml logs/gpt2_124m-only_proj-layer_quant-2obj-np100-ng100 --skip-baselines
 """
 
 from __future__ import annotations

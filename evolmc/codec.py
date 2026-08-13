@@ -6,7 +6,7 @@ This is the part reviewers attack, so every bit is charged explicitly:
                        Huffman cost of the layer's symbol histogram (archival)
   * codebook bits   -- one codebook per group, k_centroids entries of fp16
   * table bits      -- canonical-Huffman code lengths, one table per layer
-  * untouched bits  -- embeddings, LM head, norms and biases, still fp16
+  * untouched bits  -- whatever was left out of the target set, still fp16
 
 Two compression ratios are reported and they must never be mixed:
 
@@ -17,10 +17,9 @@ Two compression ratios are reported and they must never be mixed:
                 decoded before it can be used. Quote this only for
                 storage/transmission claims. Reported as `cr_archive`.
 
-`avg_bits` counts the whole checkpoint -- target matrices plus whatever stays
-untouched (embeddings, LM head, norms, biases) -- the honest end-to-end
-figure, unlike a target-only average that hides how much of the model was
-never touched.
+`avg_bits` counts the whole checkpoint -- target tensors plus whatever stays
+untouched -- the honest end-to-end figure, unlike a target-only average that
+hides how much of the model was never touched.
 """
 
 from __future__ import annotations

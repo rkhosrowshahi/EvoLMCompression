@@ -25,11 +25,11 @@ python scripts/smoke_test.py --model gpt2
 Search, then evaluate the front on held-out data:
 
 ```bash
-python scripts/run_search.py configs/uq/gpt2_124m/gpt2_124m-layer_quant-2obj.yaml
+python scripts/run_search.py configs/uq/gpt2_124m/gpt2_124m-only_proj-layer_quant-2obj.yaml
 ```
 
 ```bash
-python scripts/run_eval.py configs/uq/gpt2_124m/gpt2_124m-layer_quant-2obj.yaml logs/gpt2_124m-layer_quant-2obj-np100-ng100
+python scripts/run_eval.py configs/uq/gpt2_124m/gpt2_124m-only_proj-layer_quant-2obj.yaml logs/gpt2_124m-only_proj-layer_quant-2obj-np100-ng100
 ```
 
 Each run writes one timestamped directory under `logs/` containing its config,

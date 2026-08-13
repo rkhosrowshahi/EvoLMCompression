@@ -443,10 +443,13 @@ def calibrate(compressor, cfg) -> LatencyProxy:
         "fp16": cls("fp16", 1.0, lat.kernels_dense),
     }
 
+    # 1-D norms/biases are not GEMVs. Quantizing them still dequants to fp16
+    # before the elementwise kernel, so they do not belong in the per-layer
+    # roofline; their kernel time stays in T_other.
     geometry = {t.name: LayerGeometry(name=t.name, in_features=t.in_features,
                                       out_features=t.out_features,
                                       n_weights=t.n_weights)
-                for t in compressor.targets}
+                for t in compressor.targets if not t.is_vector}
 
     fixed_ms, parts = _fixed_cost(compressor, cfg, classes["fp16"], beta_fp16)
 

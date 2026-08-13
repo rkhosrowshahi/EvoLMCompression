@@ -75,7 +75,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--runs", nargs="*", default=DEFAULT_RUNS)
     ap.add_argument("--root", default="logs")
-    ap.add_argument("--config", default="configs/uq_pruning/gpt2_124m/gpt2_124m-layer_quant-global_prune_sigma-bitmap-3obj.yaml",
+    ap.add_argument("--config", default="configs/uq_pruning/gpt2_124m/gpt2_124m-only_proj-layer_quant-global_prune_sigma-bitmap-3obj.yaml",
                     help="only the model/quant settings are used")
     ap.add_argument("--limit", type=int, default=None,
                     help="price only the first N front members (for a quick look)")

@@ -23,6 +23,8 @@ from dataclasses import dataclass
 
 import torch
 
+from .grouping import layer_granularity
+
 NEG_SYMBOL = -1  # internal marker for "pruned", remapped to symbol 0 at the end
 
 
@@ -294,8 +296,9 @@ def compress_layer(
         alive_rows = torch.ones_like(rows, dtype=torch.bool)
 
     # -- 2. group, then bin the survivors -----------------------------------
-    w = _reshape_groups(rows, quant_cfg.granularity, quant_cfg.group_size)
-    alive = _reshape_groups(alive_rows, quant_cfg.granularity, quant_cfg.group_size)
+    gran = layer_granularity(name, quant_cfg)
+    w = _reshape_groups(rows, gran, quant_cfg.group_size)
+    alive = _reshape_groups(alive_rows, gran, quant_cfg.group_size)
 
     # Reserve one symbol for zero when pruning is active, so the index width
     # stays exactly ceil(log2(K)) no matter how much gets pruned.

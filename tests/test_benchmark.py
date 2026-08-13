@@ -556,14 +556,11 @@ def test_bitmap_and_csr_are_separate_kernel_classes():
 
 @pytest.mark.slow
 def test_the_three_target_sets_are_actually_distinct():
-    """`(b) include LM head` and `(c) no exclusion` were IDENTICAL before
-    include_embeddings existed.
+    """Embeddings always pass the type filter; exclude_patterns is the dial.
 
-    discover_targets filters on module TYPE before it looks at exclude_patterns,
-    so both nn.Embedding tables were invisible whatever the list said: wte only
-    entered through the tied lm_head Linear, and wpe could not enter at all.
-    An empty exclude list therefore reproduced the head cell exactly. This is
-    the regression guard on the flag that fixed it.
+    `proj_w_lm_head` keeps `wte`/`wpe` excluded so the tied table enters as
+    `lm_head`. `all` drops the exclude list (so `wte`/`wpe` enter as
+    Embeddings) and sets `include_1d` for norms and biases.
     """
     from evolmc.config import ModelConfig
     from evolmc.models import (
@@ -572,24 +569,39 @@ def test_the_three_target_sets_are_actually_distinct():
 
     model, _ = load_model(ModelConfig(device="cpu", dtype="float32"))
     scopes = {
-        "core": (["lm_head", "embed", "wte", "wpe"], False),
-        "head": (["embed", "wte", "wpe"], False),
-        "full": ([], True),
+        "only_proj": (["lm_head", "embed", "wte", "wpe"], False),
+        "proj_w_lm_head": (["embed", "wte", "wpe"], False),
+        "all": ([], True),
     }
     seen = {}
-    for name, (excl, emb) in scopes.items():
-        t = discover_targets(model, excl, include_embeddings=emb)
+    for name, (excl, vec) in scopes.items():
+        t = discover_targets(model, excl, include_1d=vec)
         seen[name] = (len(t), sum(x.n_weights for x in t),
                       count_untouched_weights(model, t))
 
-    assert seen["core"] == (48, 84_934_656, 39_505_152)
-    assert seen["head"] == (49, 123_532_032, 907_776)
-    assert seen["full"] == (50, 124_318_464, 121_344)
+    assert seen["only_proj"] == (48, 84_934_656, 39_505_152)
+    assert seen["proj_w_lm_head"] == (49, 123_532_032, 907_776)
+    assert seen["all"] == (148, 124_439_808, 0)
     assert len({v for v in seen.values()}) == 3, "the three scopes must differ"
 
     # Every scope must account for the whole checkpoint exactly once.
     for name, (_, target, untouched) in seen.items():
         assert target + untouched == 124_439_808, name
+
+
+def test_all_configs_include_norms_and_biases():
+    """The `all` filename token is every parameter, not every 2-D matrix."""
+    import glob
+
+    from evolmc.config import Config
+
+    paths = sorted(glob.glob("configs/**/gpt2_124m-all-*.yaml", recursive=True))
+    assert paths, "no all-target configs found"
+    for p in paths:
+        cfg = Config.from_yaml(p)
+        assert cfg.model.exclude_patterns == (), p
+        assert cfg.model.include_1d, p
+        assert "include_embeddings" not in open(p, encoding="utf-8").read(), p
 
 
 @pytest.mark.slow
@@ -603,7 +615,7 @@ def test_tied_weights_are_claimed_once_when_embeddings_are_included():
     model, _ = load_model(ModelConfig(device="cpu", dtype="float32"))
     assert model.lm_head.weight is model.transformer.wte.weight
 
-    t = discover_targets(model, [], include_embeddings=True)
+    t = discover_targets(model, [])
     ids = [id(x.module.weight) for x in t]
     assert len(ids) == len(set(ids)), "a weight was claimed twice"
     names = {x.name for x in t}
@@ -627,7 +639,7 @@ def test_scope_configs_form_the_full_grid():
         assert p.endswith(f"_{method}.yaml"), (
             f"{p} name and prune.enabled disagree")
         grid.add((cfg.variables.k_grouping, tuple(cfg.model.exclude_patterns),
-                  cfg.model.include_embeddings, method))
+                  cfg.model.include_1d, method))
         # The format has to follow the method or pruning is invisible to f2.
         assert cfg.quant.deployable_format == (
             "bitmap" if cfg.prune.enabled else "dense"), p
@@ -641,9 +653,9 @@ def test_scope_configs_form_the_full_grid():
         # Latency and memory are measured after the search, not optimized.
         assert cfg.benchmark.enabled, p
     assert len(grid) == 18, "duplicate cell in the grid"
-    assert len({g for g, _, _, _ in grid}) == 3          # groupings
-    assert len({(e, m) for _, e, m, _ in grid}) == 3     # target sets
-    assert len({m for _, _, _, m in grid}) == 2          # methods
+    assert len({g for g, *_ in grid}) == 3               # groupings
+    assert len({(e, d) for _, e, d, *_ in grid}) == 3    # target sets
+    assert len({m for *_, m in grid}) == 2               # methods
 
 
 def test_matched_prune_grouping_configs_pair_with_a_global_sibling():
@@ -656,7 +668,7 @@ def test_matched_prune_grouping_configs_pair_with_a_global_sibling():
     Matched by config CONTENT, not filename: the scope family still marks
     this variant with a `_matched.yaml` suffix, while the k-sweep/companding
     family encodes prune_grouping directly in the filename tokens instead
-    (gpt2_124m-{k_grouping}_quant-{prune_grouping}_prune_sigma-bitmap-Nobj.yaml), so a
+    (gpt2_124m-only_proj-{k_grouping}_quant-{prune_grouping}_prune_sigma-bitmap-Nobj.yaml), so a
     filename-pattern check would only ever catch one of the two schemes.
     """
     import glob
@@ -677,7 +689,7 @@ def test_matched_prune_grouping_configs_pair_with_a_global_sibling():
         """Everything a matched config and its global sibling must share."""
         return (cfg.model.name, cfg.quant.binning, cfg.variables.k_grouping,
                 tuple(cfg.search.objectives), cfg.quant.deployable_format,
-                tuple(cfg.model.exclude_patterns), cfg.model.include_embeddings)
+                tuple(cfg.model.exclude_patterns), cfg.model.include_1d)
 
     all_paths = sorted(glob.glob("configs/**/*.yaml", recursive=True))
     loaded = [(p, Config.from_yaml(p)) for p in all_paths]

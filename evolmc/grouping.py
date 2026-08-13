@@ -49,6 +49,19 @@ def build_groups(layers: list[TargetLayer], scheme: str) -> tuple[list[str], dic
     return order, assign
 
 
+def layer_granularity(name: str, quant_cfg) -> str:
+    """Effective codebook grouping for one layer.
+
+    `quant.per_channel_patterns` overrides the global `quant.granularity` for
+    matching names, so a per_tensor run can still give `wte` / `lm_head` a
+    codebook per token row.
+    """
+    for p in getattr(quant_cfg, "per_channel_patterns", ()) or ():
+        if p and p in name:
+            return "per_channel"
+    return quant_cfg.granularity
+
+
 def max_k_for_layer(layer: TargetLayer, quant_cfg) -> int:
     """Largest codebook size that layer can actually fill.
 
@@ -57,9 +70,10 @@ def max_k_for_layer(layer: TargetLayer, quant_cfg) -> int:
     that is a property of the layer and the granularity, not a global setting.
     Asking for more just stores empty centroids that are still paid for.
     """
-    if quant_cfg.granularity == "per_tensor":
+    gran = layer_granularity(layer.name, quant_cfg)
+    if gran == "per_tensor":
         return int(layer.n_weights)
-    if quant_cfg.granularity == "per_channel":
+    if gran == "per_channel":
         return int(layer.in_features)
     return int(quant_cfg.group_size)
 
@@ -104,11 +118,15 @@ class Genome:
         self.k_groups, self.k_assign = build_groups(layers, var_cfg.k_grouping)
         self.n_k = len(self.k_groups)
 
-        # A group's ceiling is the MINIMUM over its member layers: one K has to
-        # be valid for every layer the group covers. With `block` grouping a
-        # block's narrowest layer sets the limit for all four.
+        # A group's ceiling is the MINIMUM over its 2-D member layers: one K
+        # has to be valid for every matrix the group covers. With `block`
+        # grouping a block's narrowest layer sets the limit for all four.
+        # 1-D norms/biases are clamped per layer in decode instead -- a 768-wide
+        # LayerNorm must not drag a shared K down from 8192 to 768.
         caps = np.full(self.n_k, self.k_max, dtype=np.int64)
         for layer in layers:
+            if layer.is_vector:
+                continue
             g = self.k_assign[layer.name]
             caps[g] = min(caps[g], max_k_for_layer(layer, quant_cfg))
         self.k_max_group = np.maximum(caps, self.k_min)
@@ -169,6 +187,9 @@ class Genome:
         for layer in self.layers:
             g = self.k_assign[layer.name]
             k = k_per_group[g]
+            cap = max_k_for_layer(layer, self.quant)
+            if k > cap:
+                k = max(int(cap), self.k_min)
             if self.n_p:
                 pg = self.p_assign[layer.name]
                 t_lo, t_hi = -float(lo[pg]), float(hi[pg])

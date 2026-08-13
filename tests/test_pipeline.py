@@ -671,6 +671,67 @@ def test_proj_type_disambiguates_by_parent_module():
     assert _proj_type("transformer.h.0.c_fc") == "c_fc"
     assert _proj_type("dense") == "dense"
 
+    # Biases keep the parent qualifier so attn/mlp c_proj.bias stay distinct.
+    assert _proj_type("transformer.h.0.attn.c_proj.bias") == "attn.c_proj.bias"
+    assert _proj_type("transformer.h.0.mlp.c_proj.bias") == "mlp.c_proj.bias"
+    assert _proj_type("transformer.h.0.ln_1.bias") == "ln_1.bias"
+
+
+def test_include_1d_picks_up_norms_and_biases():
+    """`all` means every parameter, including LayerNorms and biases."""
+    import torch.nn as nn
+
+    from evolmc.models import (
+        MasterWeights, count_untouched_weights, discover_targets,
+    )
+
+    class Tiny(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.fc = nn.Linear(4, 8, bias=True)
+            self.ln = nn.LayerNorm(8)
+
+    m = Tiny()
+    matrices = discover_targets(m, [])
+    assert {t.name for t in matrices} == {"fc"}
+    assert count_untouched_weights(m, matrices) == 8 + 8 + 8  # bias + ln w/b
+
+    full = discover_targets(m, [], include_1d=True)
+    names = {t.name for t in full}
+    assert names == {"fc", "fc.bias", "ln", "ln.bias"}
+    assert count_untouched_weights(m, full) == 0
+    assert all(t.is_vector for t in full if t.name != "fc")
+
+    master = MasterWeights(full, "cpu")
+    layer = next(t for t in full if t.name == "ln")
+    orig = master.original(layer).clone()
+    master.write(layer, orig * 0.5)
+    assert torch.allclose(layer.rows_view(layer.param()), orig * 0.5)
+    master.restore(layer)
+    assert torch.allclose(layer.rows_view(layer.param()), orig)
+
+
+def test_vector_layers_do_not_cap_a_shared_k():
+    """A 768-wide LayerNorm must not drag global K from 8192 down to 768."""
+    from evolmc.grouping import Genome
+    from evolmc.models import TargetLayer
+
+    big = TargetLayer("fc", torch.nn.Linear(4, 4), 768 * 768, 768, 768,
+                      0, "fc", False)
+    vec = TargetLayer("ln", torch.nn.LayerNorm(768), 768, 1, 768,
+                      0, "ln", False, param_name="weight", is_vector=True)
+    cfg = Config()
+    cfg.prune.enabled = False
+    cfg.quant.granularity = "per_tensor"
+    cfg.quant.k_encoding = "integer"
+    cfg.quant.k_min, cfg.quant.k_max = 2, 8192
+    cfg.variables.k_grouping = "global"
+    g = Genome([big, vec], cfg.quant, cfg.prune, cfg.variables)
+    assert int(g.k_max_group[0]) == 8192
+    settings = g.decode(np.ones(g.n_var))
+    assert settings["fc"].k == 8192
+    assert settings["ln"].k == 768
+
 
 def test_gpt2_type_grouping_separates_attn_and_mlp_projections():
     from evolmc.grouping import Genome
@@ -806,6 +867,41 @@ def test_max_k_for_layer_follows_granularity():
                            ("per_group", 128)):
         cfg.quant.granularity = gran
         assert max_k_for_layer(lyr, cfg.quant) == expected
+
+
+def test_per_channel_patterns_override_per_tensor_for_wte():
+    """A per_tensor run can still give wte / lm_head a codebook per token."""
+    from evolmc.compressor import _n_groups
+    from evolmc.grouping import layer_granularity, max_k_for_layer
+    from evolmc.quantize import compress_layer
+
+    wte = _layer("transformer.wte", 50257, 768, block=-1, ptype="transformer.wte")
+    proj = _layer("transformer.h.0.mlp.c_fc", 3072, 768)
+    cfg = Config()
+    cfg.quant.granularity = "per_tensor"
+    cfg.quant.per_channel_patterns = ("wte",)
+    cfg.prune.enabled = False
+
+    assert layer_granularity(wte.name, cfg.quant) == "per_channel"
+    assert layer_granularity(proj.name, cfg.quant) == "per_tensor"
+    assert max_k_for_layer(wte, cfg.quant) == 768
+    assert max_k_for_layer(proj, cfg.quant) == 3072 * 768
+    assert _n_groups(wte, cfg.quant) == 50257
+    assert _n_groups(proj, cfg.quant) == 1
+
+    rows = torch.randn(8, 16)
+    recon, stats = compress_layer(
+        rows, rows.std(dim=1, keepdim=True).clamp_min(1e-8),
+        k=4, t_lo=0.0, t_hi=0.0,
+        quant_cfg=cfg.quant, prune_cfg=cfg.prune, name="transformer.wte")
+    assert stats.n_groups == 8
+    recon_p, stats_p = compress_layer(
+        rows, rows.std(dim=1, keepdim=True).clamp_min(1e-8),
+        k=4, t_lo=0.0, t_hi=0.0,
+        quant_cfg=cfg.quant, prune_cfg=cfg.prune, name="transformer.h.0.mlp.c_fc")
+    assert stats_p.n_groups == 1
+    assert recon.shape == rows.shape
+    assert recon_p.shape == rows.shape
 
 
 def test_group_ceiling_is_the_minimum_over_member_layers():

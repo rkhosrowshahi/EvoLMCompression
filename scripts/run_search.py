@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Run one compression search.
 
-    python scripts/run_search.py configs/uq_pruning/gpt2_124m/gpt2_124m-type_quant-global_prune_sigma-bitmap-2obj.yaml
+    python scripts/run_search.py configs/uq_pruning/gpt2_124m/gpt2_124m-only_proj-type_quant-global_prune_sigma-bitmap-2obj.yaml
     python scripts/run_search.py configs/uq_pruning/pythia_410m/pythia_410m.yaml --name ablation-kmeans
     python scripts/run_search.py configs/uq_pruning/llama2_7b/llama2_7b.yaml --resume gpt2-k-layer
 

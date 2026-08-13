@@ -24,7 +24,13 @@ _BLOCK_RE = re.compile(r"\.(?:layers|h|blocks|block)\.(\d+)\.")
 
 @dataclass(frozen=True)
 class TargetLayer:
-    """A weight matrix the search is allowed to compress."""
+    """A weight the search is allowed to compress.
+
+    2-D matrices (Linear, Conv1D, Embedding) keep their native layout.
+    1-D vectors (LayerNorm scale/bias, projection biases) are viewed as a
+    single-row matrix `[1, n]` so the rest of the pipeline can treat them as
+    one per-tensor codebook.
+    """
 
     name: str
     module: nn.Module
@@ -34,6 +40,11 @@ class TargetLayer:
     block: int  # -1 if the layer sits outside the decoder stack
     proj_type: str  # "q_proj", "c_attn", "down_proj", ...
     transposed: bool  # True for Conv1D: stored weight is [in, out]
+    param_name: str = "weight"  # "weight" or "bias"
+    is_vector: bool = False  # True for 1-D norms and biases
+
+    def param(self) -> nn.Parameter:
+        return getattr(self.module, self.param_name)
 
     def rows_view(self, w: torch.Tensor) -> torch.Tensor:
         """Return the weight as [out_features, in_features].
@@ -41,10 +52,14 @@ class TargetLayer:
         Per-channel codebooks are per *output* channel, so we always work in
         this orientation regardless of how the module stores its weight.
         """
+        if self.is_vector:
+            return w.reshape(1, -1)
         return w.t() if self.transposed else w
 
     def store_view(self, w: torch.Tensor) -> torch.Tensor:
         """Inverse of `rows_view` -- back to the module's storage layout."""
+        if self.is_vector:
+            return w.reshape(-1)
         return w.t() if self.transposed else w
 
 
@@ -85,38 +100,38 @@ def _proj_type(name: str) -> str:
     MLP down-projection to share a codebook size despite 4x different row
     widths. Llama-style names are already unique; qualifying them is harmless
     and more readable ("self_attn.q_proj" rather than "q_proj").
+
+    1-D biases keep the same qualifier with a `.bias` suffix, so
+    `attn.c_proj.bias` and `mlp.c_proj.bias` stay distinct under type grouping.
     """
-    parts = name.split(".")
+    bias = name.endswith(".bias")
+    base = name[: -len(".bias")] if bias else name
+    parts = base.split(".")
     if len(parts) >= 2 and not parts[-2].isdigit():
-        return f"{parts[-2]}.{parts[-1]}"
-    return parts[-1]
+        key = f"{parts[-2]}.{parts[-1]}"
+    else:
+        key = parts[-1]
+    return f"{key}.bias" if bias else key
 
 
 def discover_targets(model: nn.Module, exclude_patterns,
-                     include_embeddings: bool = False) -> list[TargetLayer]:
-    """Find every 2-D weight matrix eligible for compression.
+                     include_1d: bool = False) -> list[TargetLayer]:
+    """Find every parameter eligible for compression.
 
-    THE TYPE FILTER RUNS FIRST, and that is the thing to know before writing an
-    exclude list. Only the module types below are ever candidates, so norms and
-    biases can never enter the target set no matter what the patterns say --
-    they are 1-D parameters on LayerNorm modules. Removing "wte" from the
-    exclude list is likewise a no-op unless `include_embeddings` is set.
-
-    `include_embeddings` adds nn.Embedding. On GPT-2 that is the difference
-    between "everything reachable through a Linear" and "everything": the
-    positional table `wpe` is an Embedding and is reachable no other way, while
-    the token table `wte` is reachable through the tied `lm_head` Linear.
+    Linear, Conv1D and Embedding 2-D weights always pass the type filter;
+    `exclude_patterns` is what keeps embeddings and the LM head out. Norms and
+    biases stay fp16 unless `include_1d` is set -- they are 1-D, so no exclude
+    pattern can bring them in by itself. Vectors are stored as `[1, n]` so they
+    share the 2-D codebook path; they are quantized but never pruned.
 
     TIED WEIGHTS ARE CLAIMED ONCE. GPT-2's lm_head.weight IS transformer.wte
-    .weight, the same Parameter. With embeddings included, both modules pass the
-    type filter, and returning both would give MasterWeights two entries for one
-    tensor -- the second write would silently overwrite the first and the bit
-    accounting would double-count. First module wins; the rest are skipped.
+    .weight, the same Parameter. Both modules pass the type filter, and
+    returning both would give MasterWeights two entries for one tensor -- the
+    second write would silently overwrite the first and the bit accounting
+    would double-count. First module wins; the rest are skipped.
     """
     targets: list[TargetLayer] = []
-    linear_types = (nn.Linear,) + ((Conv1D,) if Conv1D else ())
-    if include_embeddings:
-        linear_types = linear_types + (nn.Embedding,)
+    linear_types = (nn.Linear, nn.Embedding) + ((Conv1D,) if Conv1D else ())
     seen_weights: set[int] = set()
 
     for name, mod in model.named_modules():
@@ -146,17 +161,47 @@ def discover_targets(model: nn.Module, exclude_patterns,
                 transposed=transposed,
             )
         )
+
+    if include_1d:
+        for pname, p in model.named_parameters():
+            if p.ndim != 1 or id(p) in seen_weights:
+                continue
+            if any(pat in pname for pat in exclude_patterns):
+                continue
+            parent_name, leaf = pname.rsplit(".", 1)
+            try:
+                mod = model.get_submodule(parent_name)
+            except AttributeError:
+                continue
+            seen_weights.add(id(p))
+            tname = parent_name if leaf == "weight" else pname
+            m = _BLOCK_RE.search(tname)
+            targets.append(
+                TargetLayer(
+                    name=tname,
+                    module=mod,
+                    n_weights=p.numel(),
+                    out_features=1,
+                    in_features=int(p.numel()),
+                    block=int(m.group(1)) if m else -1,
+                    proj_type=_proj_type(tname),
+                    transposed=False,
+                    param_name=leaf,
+                    is_vector=True,
+                )
+            )
+
     if not targets:
         raise RuntimeError("no quantizable layers found -- check exclude_patterns")
     return targets
 
 
 def count_untouched_weights(model: nn.Module, targets: list[TargetLayer]) -> int:
-    """Parameters that stay in fp16 (embeddings, head, norms, biases).
+    """Parameters that stay in fp16 (whatever was left out of the target set).
 
     Counted once even when the LM head is tied to the input embedding.
     """
-    target_ids = {id(t.module.weight) for t in targets}
+    target_ids = {id(t.param()) for t in targets}
     seen: set[int] = set()
     total = 0
     for p in model.parameters():
@@ -179,7 +224,7 @@ class MasterWeights:
         self.device = _resolve_device(master_device)
         self.targets = targets
         self._master: dict[str, torch.Tensor] = {
-            t.name: t.module.weight.detach().to(self.device, copy=True) for t in targets
+            t.name: t.param().detach().to(self.device, copy=True) for t in targets
         }
         # Pruning thresholds are expressed in units of a per-row scale; that
         # scale never changes, so compute it once here.
@@ -191,19 +236,20 @@ class MasterWeights:
     def original(self, layer: TargetLayer) -> torch.Tensor:
         """Master weight in [out, in] orientation, fp32, on the compute device."""
         w = self._master[layer.name]
-        return layer.rows_view(w).to(layer.module.weight.device, torch.float32)
+        return layer.rows_view(w).to(layer.param().device, torch.float32)
 
     def row_scale(self, layer: TargetLayer) -> torch.Tensor:
-        return self._row_scale[layer.name].to(layer.module.weight.device)
+        return self._row_scale[layer.name].to(layer.param().device)
 
     def write(self, layer: TargetLayer, rows: torch.Tensor) -> None:
         """Install a compressed weight (given as [out, in]) into the live model."""
-        dst = layer.module.weight
+        dst = layer.param()
         dst.data.copy_(layer.store_view(rows).to(dst.dtype))
 
     def restore(self, layer: TargetLayer | None = None) -> None:
         for t in ([layer] if layer is not None else self.targets):
-            t.module.weight.data.copy_(self._master[t.name].to(t.module.weight.device))
+            dst = t.param()
+            dst.data.copy_(self._master[t.name].to(dst.device))
 
     @property
     def n_target_weights(self) -> int:

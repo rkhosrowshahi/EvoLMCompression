@@ -55,7 +55,8 @@ def calibrate(compressor, windows: torch.Tensor, batch_size: int = 1) -> Activat
     was_training = model.training
     model.eval()
 
-    hookable = [t for t in compressor.targets if isinstance(t.module, _HOOKABLE)]
+    hookable = [t for t in compressor.targets
+                if isinstance(t.module, _HOOKABLE) and not t.is_vector]
     sums = {t.name: torch.zeros(t.in_features, dtype=torch.float64, device=device)
             for t in hookable}
     n_tokens = 0
