@@ -171,14 +171,48 @@ def _layers(n_blocks=2, types=("q_proj", "o_proj")):
 
 
 def test_companding_adds_a_warp_gene_block_sized_to_the_k_groups():
+    """Default layout: alpha, gamma, M residual slopes. No flag genes."""
     cfg = _cfgs(prune={"enabled": False})
     layers = _layers()
     g = Genome(layers, cfg.quant, cfg.prune, cfg.variables)
     assert g.n_k == 2  # k_grouping="type" default
     assert g.companding is True
     assert g.n_w == g.n_k
-    assert g.warp_dim == 2 + cfg.quant.companding_residual_genes + 2
+    assert g.warp_flags is False
+    assert g.warp_dim == 2 + cfg.quant.companding_residual_genes
     assert g.n_var == g.n_k + g.n_w * g.warp_dim
+
+
+def test_companding_flag_genes_restore_the_pre_removal_layout():
+    """force_zero/reassign were dropped from the genome once the logged fronts
+    showed them selected True on 0.04% and 0.17% of group-settings. The opt-in
+    must still reproduce the old width, or genomes recorded before the change
+    cannot be reshaped and every historical run becomes unreadable."""
+    cfg = _cfgs(prune={"enabled": False}, quant={"companding_flag_genes": True})
+    layers = _layers()
+    g = Genome(layers, cfg.quant, cfg.prune, cfg.variables)
+    assert g.warp_flags is True
+    assert g.warp_dim == 2 + cfg.quant.companding_residual_genes + 2
+
+    # the two trailing genes must still decode to the flags, high and low
+    x = np.zeros(g.n_var)
+    s = g.decode(x)[layers[0].name]
+    assert s.force_zero is False and s.reassign is False
+    x[g.n_k:] = np.tile(
+        np.concatenate([np.zeros(2 + cfg.quant.companding_residual_genes), [1.0, 1.0]]),
+        g.n_w)
+    s = g.decode(x)[layers[0].name]
+    assert s.force_zero is True and s.reassign is True
+
+
+def test_flags_are_never_set_without_the_flag_genes():
+    """With the genes gone, no genome -- not even all-ones -- may turn them on."""
+    cfg = _cfgs(prune={"enabled": False})
+    layers = _layers()
+    g = Genome(layers, cfg.quant, cfg.prune, cfg.variables)
+    for x in (np.zeros(g.n_var), np.ones(g.n_var), np.full(g.n_var, 0.75)):
+        s = g.decode(x)[layers[0].name]
+        assert s.force_zero is False and s.reassign is False
 
 
 def test_non_companding_genome_is_unaffected():
@@ -255,7 +289,8 @@ def test_warp_genes_are_shared_within_a_k_group_and_vary_across_groups():
 
 
 def test_flag_genes_threshold_at_one_half():
-    cfg = _cfgs(prune={"enabled": False})
+    # Only meaningful with the opt-in layout: by default the flag genes do not exist.
+    cfg = _cfgs(prune={"enabled": False}, quant={"companding_flag_genes": True})
     layers = [TargetLayer("m.layers.0.q_proj", torch.nn.Linear(4, 4),
                           4096 * 4096, 4096, 4096, 0, "q_proj", False)]
     g = Genome(layers, cfg.quant, cfg.prune, cfg.variables)

@@ -158,6 +158,15 @@ class QuantConfig:
     companding_residual_genes: int = 6  # M piecewise-linear segments (genome)
     companding_grid: int = 256          # histogram / backbone resolution
     companding_reassign_iters: int = 3  # Lloyd passes when the reassign flag fires
+    # Two boolean genes, force_zero and reassign, used to sit at the end of every warp group.
+    # Across all 32 companding runs logged to date they are selected True on 0.04% and 0.17%
+    # of final-front group-settings respectively. Since a flag gene decodes as (gene >= 0.5)
+    # from a uniform [0,1] initial population, they start near 50%: ending at ~0 is active
+    # selection against them, not indifference. They are therefore off by default, which drops
+    # the per-group warp width from 2+M+2 to 2+M (11 -> 9 vars per group including K).
+    # Set true to decode a genome recorded BEFORE this change -- the old logs' n_var assumes
+    # the wider layout and will not reshape otherwise.
+    companding_flag_genes: bool = False
 
 
 @dataclass

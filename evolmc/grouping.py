@@ -141,11 +141,14 @@ class Genome:
         # Companding warp shares its groups with K: a warp shape and a
         # codebook size jointly define one quantizer, so there is no
         # separate `warp_grouping` dial. Per group: alpha, gamma, M residual
-        # slopes, 2 flag genes (force_zero, reassign).
+        # slopes, and -- only when companding_flag_genes is on -- the two
+        # boolean genes force_zero and reassign. See the note in config.py:
+        # the search drives both to False, so they are off by default.
         self.companding = (getattr(quant_cfg, "binning", "uniform") == "companding")
         if self.companding:
             self.warp_m = int(getattr(quant_cfg, "companding_residual_genes", 6))
-            self.warp_dim = 2 + self.warp_m + 2
+            self.warp_flags = bool(getattr(quant_cfg, "companding_flag_genes", False))
+            self.warp_dim = 2 + self.warp_m + (2 if self.warp_flags else 0)
             self.n_w = self.n_k
             self.alpha_min = float(getattr(quant_cfg, "companding_alpha_min", 2.0))
             self.alpha_max = float(getattr(quant_cfg, "companding_alpha_max", 6.0))
@@ -179,8 +182,11 @@ class Genome:
             alpha = self.alpha_min + wx[:, 0] * (self.alpha_max - self.alpha_min)
             gamma = self.gamma_min + wx[:, 1] * (self.gamma_max - self.gamma_min)
             u = wx[:, 2 : 2 + self.warp_m]
-            force_zero = wx[:, 2 + self.warp_m] >= 0.5
-            reassign = wx[:, 2 + self.warp_m + 1] >= 0.5
+            if self.warp_flags:
+                force_zero = wx[:, 2 + self.warp_m] >= 0.5
+                reassign = wx[:, 2 + self.warp_m + 1] >= 0.5
+            else:
+                force_zero = reassign = np.zeros(self.n_w, dtype=bool)
             warp = (alpha, gamma, u, force_zero, reassign)
 
         out: dict[str, LayerSetting] = {}
@@ -329,7 +335,8 @@ class Genome:
         if self.companding:
             lines.append(f"  companding warp  : {self.n_w} groups x "
                          f"{self.warp_dim} vars (alpha, gamma, "
-                         f"{self.warp_m} residual, 2 flags)")
+                         f"{self.warp_m} residual"
+                         + (", 2 flags)" if self.warp_flags else ", no flag genes)"))
         if self.k_encoding == "integer":
             lines.append(f"  K encoding       : integer, log-spaced in "
                          f"[{self.k_min}, {self.k_max}] "
