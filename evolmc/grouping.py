@@ -90,6 +90,11 @@ class LayerSetting:
     u: np.ndarray | None = None      # raw residual-warp genes, length M
     force_zero: bool = False         # snap the nearest centroid to exactly 0
     reassign: bool = False           # Lloyd-reassign the warp bins after binning
+    # Width quantization (binning == "widths" only). Raw log-width genes,
+    # length Genome.width_dim; only the first kc = (k-1 if pruning else k)
+    # entries are meaningful for a given candidate -- quantize.py's
+    # _widths_edges is the only place that slices them down to kc.
+    widths_z: np.ndarray | None = None
 
 
 class Genome:
@@ -157,8 +162,24 @@ class Genome:
         else:
             self.warp_m = self.warp_dim = self.n_w = 0
 
-        # Layout: [K vars ...][t_lo vars ...][t_hi vars ...][warp vars ...]
-        self.n_var = self.n_k + 2 * self.n_p + self.n_w * self.warp_dim
+        # Width quantization shares its groups with K, same rationale as the
+        # companding warp block. Sized to k_max_group.max() rather than a
+        # per-group width_dim: every group gets the SAME block size, so gene
+        # i keeps a fixed meaning ("this group's bin i") across the whole
+        # run; a group whose own K ceiling is lower just leaves a longer
+        # unused tail (see decode(), which reads only the first kc genes).
+        self.widths = (getattr(quant_cfg, "binning", "uniform") == "widths")
+        if self.widths:
+            self.n_ws = self.n_k
+            self.width_dim = int(self.k_max_group.max())
+            self.width_log_lo = float(getattr(quant_cfg, "widths_log_lo", -14.0))
+            self.width_log_hi = float(getattr(quant_cfg, "widths_log_hi", 2.0))
+        else:
+            self.n_ws = self.width_dim = 0
+
+        # Layout: [K vars ...][t_lo vars ...][t_hi vars ...][warp vars ...][width vars ...]
+        self.n_var = (self.n_k + 2 * self.n_p + self.n_w * self.warp_dim
+                     + self.n_ws * self.width_dim)
 
     # -- encoding helpers -------------------------------------------------
 
@@ -189,6 +210,12 @@ class Genome:
                 force_zero = reassign = np.zeros(self.n_w, dtype=bool)
             warp = (alpha, gamma, u, force_zero, reassign)
 
+        widths_z = None
+        if self.widths:
+            off = self.n_k + 2 * self.n_p + self.n_w * self.warp_dim
+            wz = x[off : off + self.n_ws * self.width_dim].reshape(self.n_ws, self.width_dim)
+            widths_z = self.width_log_lo + wz * (self.width_log_hi - self.width_log_lo)
+
         out: dict[str, LayerSetting] = {}
         for layer in self.layers:
             g = self.k_assign[layer.name]
@@ -201,15 +228,18 @@ class Genome:
                 t_lo, t_hi = -float(lo[pg]), float(hi[pg])
             else:
                 t_lo = t_hi = 0.0
-            if warp is None:
-                out[layer.name] = LayerSetting(k=k, t_lo=t_lo, t_hi=t_hi)
-            else:
+            if warp is not None:
                 alpha, gamma, u, force_zero, reassign = warp
                 out[layer.name] = LayerSetting(
                     k=k, t_lo=t_lo, t_hi=t_hi,
                     alpha=float(alpha[g]), gamma=float(gamma[g]),
                     u=u[g].copy(), force_zero=bool(force_zero[g]),
                     reassign=bool(reassign[g]))
+            elif widths_z is not None:
+                out[layer.name] = LayerSetting(
+                    k=k, t_lo=t_lo, t_hi=t_hi, widths_z=widths_z[g].copy())
+            else:
+                out[layer.name] = LayerSetting(k=k, t_lo=t_lo, t_hi=t_hi)
         return out
 
     def group_choices(self, g: int) -> tuple[int, ...]:
@@ -333,10 +363,15 @@ class Genome:
         else:
             lines.append("  pruning          : disabled")
         if self.companding:
+            residual_type = getattr(self.quant, "companding_residual_type", "linear")
             lines.append(f"  companding warp  : {self.n_w} groups x "
                          f"{self.warp_dim} vars (alpha, gamma, "
-                         f"{self.warp_m} residual"
+                         f"{self.warp_m} residual [{residual_type}]"
                          + (", 2 flags)" if self.warp_flags else ", no flag genes)"))
+        if self.widths:
+            lines.append(f"  bin widths       : {self.n_ws} groups x "
+                         f"{self.width_dim} vars (log-width genes, "
+                         f"z in [{self.width_log_lo:g}, {self.width_log_hi:g}])")
         if self.k_encoding == "integer":
             lines.append(f"  K encoding       : integer, log-spaced in "
                          f"[{self.k_min}, {self.k_max}] "

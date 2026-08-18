@@ -398,6 +398,19 @@ class ModelCost:
         return sum(l.sparsity * l.n_weights for l in self.layers) / n
 
     @property
+    def non_sparsity(self) -> float:
+        """1 - sparsity, i.e. the surviving (alive) fraction of target weights.
+
+        Exists so sparsity can be driven as a MINIMIZE objective in
+        `search.objectives` (see objectives.REGISTRY) without redefining what
+        `sparsity` itself means everywhere else it's read -- avg_bits already
+        bundles weight-sharing and pruning into one scalar, so this gives
+        NSGA-II a lever that rewards sparsity on its own, independent of
+        whatever avg_bits a genome happens to land on.
+        """
+        return 1.0 - self.sparsity
+
+    @property
     def mean_k_used(self) -> float:
         n = max(self.n_target_weights, 1)
         return sum(l.k_used_mean * l.n_weights for l in self.layers) / n
@@ -424,6 +437,7 @@ class ModelCost:
             "cr_archive": self.cr_archive,
             "cr_dense": self.cr_dense,
             "sparsity": self.sparsity,
+            "non_sparsity": self.non_sparsity,
             "param_reduction": self.param_reduction,
             "n_alive_total": float(self.n_alive_total),
             "n_lookups": self.n_lookups,

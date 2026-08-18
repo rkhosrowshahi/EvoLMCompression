@@ -102,6 +102,13 @@ REGISTRY: dict[str, Objective] = {o.name: o for o in (
 
     # -- neither ------------------------------------------------------------
     Objective("sparsity", MAXIMIZE, "sparsity", "target", ""),
+    # 1 - sparsity, i.e. the surviving weight fraction, as a MINIMIZE
+    # objective. Monotone in `sparsity` (pairing the two is redundant, same
+    # as any bit_total collision, just not caught by check_redundancy since
+    # that check only reasons about bit_total), so use ONE of them, not both
+    # -- this exists for configs that want every objective in the same
+    # minimize sense rather than mixing MINIMIZE and MAXIMIZE.
+    Objective("non_sparsity", MINIMIZE, "non-sparsity", "target", ""),
     # Modelled decode latency from latency.LatencyProxy: a per-layer roofline,
     # max(bytes/beta, flops/phi), plus launch overhead, plus the fixed cost of
     # every untouched fp16 component. bit_total is EMPTY on purpose: the memory

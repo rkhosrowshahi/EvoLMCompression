@@ -4,7 +4,10 @@ Idea 1 from the non-uniform quantization notes: evolve a monotone warp F and
 quantize as round_uniform(F(x)), reconstructed with the same bin-mean
 centroid every other binning mode already uses. See evolmc/quantize.py
 (_companding_forward, _companding_assign) and evolmc/grouping.py (Genome's
-warp gene block).
+warp gene block). companding_residual_type selects how the genome's control
+points are read back into F_residual: "linear" (closed-form straight
+segments) or "ispline" (a monotone B-spline through the same control points,
+see _bspline_collocation).
 
     python -m pytest tests/test_companding.py -q
 """
@@ -23,7 +26,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from evolmc.config import Config  # noqa: E402
 from evolmc.grouping import Genome  # noqa: E402
 from evolmc.models import TargetLayer  # noqa: E402
-from evolmc.quantize import compress_layer  # noqa: E402
+from evolmc.quantize import _bspline_collocation, _companding_forward, compress_layer  # noqa: E402
 
 
 def _cfgs(**over):
@@ -158,6 +161,139 @@ def test_companding_handles_k_equals_two_with_pruning():
                                force_zero=False, reassign=True)
     assert recon.shape == w.shape
     assert st.symbol_counts.sum() == w.numel()
+
+
+# -- I-spline residual (companding_residual_type == "ispline") --------------
+
+def test_ispline_collocation_is_a_valid_monotone_basis():
+    """The three properties the rest of the ispline path leans on: rows are
+    non-negative, columns sum to 1 (partition of unity, so a convex
+    combination of control points stays in their span), and the curve
+    interpolates the first/last control point exactly at u=0/u=1."""
+    basis = _bspline_collocation(7, 3, 256)  # M=6 -> n_ctrl=7
+    assert (basis >= -1e-8).all()
+    colsum = basis.sum(dim=0)
+    assert torch.allclose(colsum, torch.ones_like(colsum), atol=1e-5)
+    assert basis[0, 0] == 1.0 and basis[1:, 0].abs().max() == 0.0
+    assert basis[-1, -1] == 1.0 and basis[:-1, -1].abs().max() == 0.0
+
+
+def test_ispline_degree_one_matches_the_hand_linear_construction():
+    """degree=1 is exactly the piecewise-linear hat basis _companding_forward
+    already builds by closed form for "linear" -- an independent check that
+    the Cox-de Boor recursion in _bspline_collocation is not off by a knot or
+    a normalization constant, isolated from the rest of the companding path."""
+    m = 6
+    grid = 64
+    c = torch.tensor([0.0, 0.1, 0.35, 0.5, 0.7, 0.9, 1.0])
+    curve = c @ _bspline_collocation(m + 1, 1, grid)
+
+    x = torch.linspace(0, 1, grid + 1)
+    pos = (x * m).clamp(0, m - 1e-6)
+    idx = pos.floor().long().clamp(0, m - 1)
+    frac = pos - idx.to(pos.dtype)
+    ref = c[idx] + frac * (c[idx + 1] - c[idx])
+    assert torch.allclose(curve, ref, atol=1e-5)
+
+
+def test_ispline_curve_is_monotone_for_random_genomes():
+    """Every u must decode to non-decreasing control points, and a B-spline
+    built from non-decreasing control points is itself non-decreasing
+    (variation diminishing) -- the property the whole construction leans on
+    for round_uniform(F(x)) to define well-ordered bins."""
+    rng = np.random.default_rng(0)
+    for m in (3, 6, 10):
+        basis = _bspline_collocation(m + 1, 3, 256)
+        for _ in range(5):
+            u = torch.tensor(rng.normal(size=m), dtype=torch.float32)
+            slopes = m * torch.softmax(u, dim=0)
+            breakpoints = torch.cat([torch.zeros(1), torch.cumsum(slopes / m, dim=0)])
+            curve = breakpoints @ basis
+            assert (curve[1:] - curve[:-1] >= -1e-6).all()
+
+
+def test_ispline_degree_requires_enough_residual_genes():
+    """n_ctrl = M+1 control points need n_ctrl > degree for a well-defined
+    interior-knot count; M=2 (n_ctrl=3) is too few for a cubic (degree=3)."""
+    with pytest.raises(ValueError, match="companding_residual_genes"):
+        _bspline_collocation(3, 3, 256)
+
+
+def test_companding_rejects_unknown_residual_type():
+    torch.manual_seed(0)
+    w = torch.randn(8, 512)
+    cfg = _cfgs(quant={"companding_residual_type": "quadratic"})
+    with pytest.raises(ValueError, match="residual_type"):
+        _compress(w, k=16, cfg=cfg)
+
+
+def test_ispline_warp_output_is_bounded_and_monotone_end_to_end():
+    """Same check as test_ispline_curve_is_monotone_for_random_genomes but
+    through the full _companding_forward path (real per-group histograms,
+    the grid/lookup interpolation, alpha clipping), not just the basis
+    matrix in isolation."""
+    torch.manual_seed(0)
+    w, _ = torch.sort(torch.randn(4, 2048), dim=1)
+    alive = torch.ones_like(w, dtype=torch.bool)
+    u = torch.tensor([2.0, -1.0, 0.5, 0.0, 1.5, -0.5])
+    f = _companding_forward(w, alive, alpha=4.0, gamma=1 / 3, u=u, grid=256,
+                            residual_type="ispline", degree=3)
+    assert f.min().item() >= 0.0 and f.max().item() <= 1.0
+    assert ((f[:, 1:] - f[:, :-1]) >= -1e-6).all()
+
+
+def test_ispline_uses_at_most_k_distinct_values_per_row():
+    torch.manual_seed(0)
+    w = torch.randn(8, 512)
+    cfg = _cfgs(quant={"companding_residual_type": "ispline"})
+    recon, st = _compress(w, k=16, cfg=cfg)
+    for row in recon:
+        assert torch.unique(row).numel() <= 16
+    assert st.symbol_counts.sum() == w.numel()
+
+
+def test_ispline_error_decreases_with_k():
+    torch.manual_seed(0)
+    w = torch.randn(16, 1024)
+    cfg = _cfgs(quant={"companding_residual_type": "ispline"})
+    errs = [_compress(w, k=k, cfg=cfg)[1].mse for k in (4, 16, 64, 256)]
+    assert all(a > b for a, b in zip(errs, errs[1:])), errs
+
+
+def test_ispline_residual_genes_change_the_reconstruction():
+    """Unlike "linear", u == 0 is not an exact identity map under "ispline"
+    (a clamped B-spline reproduces a straight line only at the Greville
+    abscissae, not at uniformly-spaced control points -- see
+    _companding_forward's docstring), so this only checks the weaker but
+    still load-bearing property: the residual genes are not inert."""
+    torch.manual_seed(0)
+    w = torch.randn(16, 2048)
+    cfg = _cfgs(quant={"companding_residual_type": "ispline"})
+    u_zero = np.zeros(cfg.quant.companding_residual_genes)
+    u_rand = np.array([2.0, -1.0, 0.5, 0.0, 1.5, -0.5])
+    mse_zero = _compress(w, k=32, gamma=1 / 3, u=u_zero, cfg=cfg)[1].mse
+    mse_rand = _compress(w, k=32, gamma=1 / 3, u=u_rand, cfg=cfg)[1].mse
+    assert mse_zero != pytest.approx(mse_rand)
+
+
+def test_ispline_residual_type_does_not_change_genome_dimensionality():
+    """companding_residual_type only changes how quantize.py reads the warp
+    genes back into a curve -- Genome's layout must not care which one is
+    configured."""
+    layers = _layers()
+    cfg_linear = _cfgs(prune={"enabled": False})
+    cfg_ispline = _cfgs(prune={"enabled": False},
+                        quant={"companding_residual_type": "ispline"})
+    g_lin = Genome(layers, cfg_linear.quant, cfg_linear.prune, cfg_linear.variables)
+    g_isp = Genome(layers, cfg_ispline.quant, cfg_ispline.prune, cfg_ispline.variables)
+    assert g_lin.n_var == g_isp.n_var
+    assert g_lin.warp_dim == g_isp.warp_dim
+
+
+def test_companding_residual_type_defaults_preserve_prior_behavior():
+    cfg = Config()
+    assert cfg.quant.companding_residual_type == "linear"
+    assert cfg.quant.companding_ispline_degree == 3
 
 
 # -- Genome: warp gene block -------------------------------------------------

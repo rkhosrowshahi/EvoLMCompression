@@ -19,8 +19,10 @@ work -- this is what makes thousands of fitness evaluations affordable.
 
 from __future__ import annotations
 
+import functools
 from dataclasses import dataclass
 
+import numpy as np
 import torch
 
 from .grouping import layer_granularity
@@ -103,6 +105,39 @@ def _quantile_edges(w: torch.Tensor, alive: torch.Tensor, kc: int) -> torch.Tens
     return torch.cummax(edges, dim=1).values
 
 
+def _widths_edges(w: torch.Tensor, alive: torch.Tensor, kc: int,
+                  z: torch.Tensor) -> torch.Tensor:
+    """kc left edges from kc genome-controlled log-widths.
+
+    The plain, backbone-free non-uniform quantizer: the genes ARE the bin
+    widths, directly in the original weight domain -- no density estimate,
+    no warp. `z` already lives in [widths_log_lo, widths_log_hi] (grouping.py
+    puts it there), so no runtime clamp is needed the way a hand-rolled
+    clip(z, -700, 700) would be -- the genome cannot leave that box.
+
+    l_i = (hi-lo) * exp(z_i) / sum(exp(z)), accumulated into kc left edges,
+    spanning this group's own surviving-weight range. Only the first `kc` of
+    `z` are read: the gene block is sized to the widest K any group in this
+    run could reach (Genome.width_dim), so a group whose own K is smaller
+    just leaves the rest of z unused for this call.
+
+    Reuses _uniform_range purely to recover this group's own (lo, hi) in one
+    min/max pass; `step` itself is discarded once span = step * kc rebuilds
+    hi - lo exactly.
+    """
+    lo, step = _uniform_range(w, alive, kc)
+    span = step * kc
+    g = torch.exp(z[:kc]).clamp_min(1e-30)
+    frac = g / g.sum()
+    cum_before = torch.cat([torch.zeros(1, device=z.device, dtype=frac.dtype),
+                            torch.cumsum(frac, dim=0)[:-1]])  # [kc] left-edge fractions
+    edges = lo + cum_before.view(1, -1) * span
+    # Enforce strict monotonicity so searchsorted stays well defined -- exp()
+    # is already strictly positive, this is float-precision insurance only,
+    # the same guard _quantile_edges applies to its own edges.
+    return torch.cummax(edges, dim=1).values
+
+
 def _assign(w: torch.Tensor, edges: torch.Tensor) -> torch.Tensor:
     idx = torch.searchsorted(edges.contiguous(), w.contiguous(), right=True) - 1
     return idx.clamp_(0, edges.shape[1] - 1)
@@ -159,8 +194,67 @@ def _masked_std(w: torch.Tensor, alive: torch.Tensor) -> torch.Tensor:
     return var.clamp_min(1e-12).sqrt()
 
 
+@functools.lru_cache(maxsize=None)
+def _bspline_collocation(n_ctrl: int, degree: int, grid: int) -> torch.Tensor:
+    """[n_ctrl, grid+1] collocation matrix for a clamped uniform B-spline.
+
+    Row i, column g holds B_i(g/grid) for the degree-`degree` basis function
+    of a curve with `n_ctrl` control points. A curve S(u) = sum_i c_i * B_i(u)
+    built from non-decreasing control points c is itself non-decreasing --
+    the variation-diminishing property that is also what makes Ramsay's
+    I-splines monotone, reached here by integrating M-splines instead of by
+    hand-rolling that recursion. `degree=1` reproduces the piecewise-linear
+    hat functions the "linear" residual already builds by closed form;
+    `degree=3` is the cubic I-spline case.
+
+    Cached: knots depend only on (n_ctrl, degree, grid), never on the genome,
+    so this recursion runs once per shape config for the life of the process.
+    """
+    if n_ctrl <= degree:
+        raise ValueError(
+            f"companding_ispline_degree={degree} needs at least {degree + 1} "
+            f"control points, i.e. companding_residual_genes >= {degree} "
+            f"(got companding_residual_genes={n_ctrl - 1})")
+    order = degree + 1
+    n_interior = n_ctrl - order
+    knots = np.concatenate([
+        np.zeros(order),
+        np.linspace(0.0, 1.0, n_interior + 2)[1:-1],
+        np.ones(order),
+    ])
+    # Nudge the right edge so every span's membership test can stay half-open;
+    # the true value at u=1 is patched in afterwards from the clamped-spline
+    # identity S(1) = last control point, which needs no numerical care.
+    x = np.linspace(0.0, 1.0, grid + 1)
+    x_open = np.minimum(x, 1.0 - 1e-12)
+
+    n_spans = len(knots) - 1
+    basis = np.zeros((n_spans, grid + 1))
+    for i in range(n_spans):
+        lo, hi = knots[i], knots[i + 1]
+        if hi > lo:
+            basis[i] = (x_open >= lo) & (x_open < hi)
+    for p in range(1, order):
+        new_basis = np.zeros((n_spans - p, grid + 1))
+        for i in range(n_spans - p):
+            left = np.zeros(grid + 1)
+            denom = knots[i + p] - knots[i]
+            if denom > 0:
+                left = (x_open - knots[i]) / denom * basis[i]
+            right = np.zeros(grid + 1)
+            denom = knots[i + p + 1] - knots[i + 1]
+            if denom > 0:
+                right = (knots[i + p + 1] - x_open) / denom * basis[i + 1]
+            new_basis[i] = left + right
+        basis = new_basis
+    basis[:, -1] = 0.0
+    basis[-1, -1] = 1.0
+    return torch.from_numpy(basis).to(torch.float32)
+
+
 def _companding_forward(w: torch.Tensor, alive: torch.Tensor, alpha: float,
-                        gamma: float, u: torch.Tensor, grid: int = 256) -> torch.Tensor:
+                        gamma: float, u: torch.Tensor, grid: int = 256,
+                        residual_type: str = "linear", degree: int = 3) -> torch.Tensor:
     """Companding warp F = F_residual o F_gamma, evaluated at every weight.
 
     F_gamma is the Bennett/Panter-Dite density-matched backbone: level density
@@ -170,10 +264,25 @@ def _companding_forward(w: torch.Tensor, alive: torch.Tensor, alpha: float,
     difference from plain uniform binning); gamma=1/3 is the classic MSE-
     optimal quantizer; gamma=1 equalizes bin probabilities.
 
-    F_residual is a monotone piecewise-linear correction on [0,1], built from
-    `len(u)` positive segment weights (softmax of `u`), applied on top of the
-    backbone. u == 0 decodes to equal segment weights, i.e. the identity map,
-    so a genome with the residual genes at zero leaves the backbone untouched.
+    F_residual is a monotone correction on [0,1], built from `len(u)` positive
+    segment weights (softmax of `u`) that become the successive increments of
+    M+1 non-decreasing control points (0 = ... = 1). u == 0 decodes to equal
+    increments in both cases, but only "linear" turns that into the exact
+    identity map -- a clamped B-spline reproduces a straight line only when
+    its control points sit at the (non-uniform, boundary-crowded) Greville
+    abscissae, not at uniform arithmetic increments, so "ispline" at u == 0
+    is a smooth, monotone, F(0)=0/F(1)=1 curve that is close to but not
+    exactly the identity (the gap shrinks as M grows, e.g. ~0.08 of the unit
+    range at M=6 vs ~0.03 at M=32, measured at companding_ispline_degree=3).
+
+    `residual_type` picks the basis those control points are read through:
+    "linear" connects them with straight segments (closed form, the original
+    construction). "ispline" reads them through a degree-`degree` monotone
+    B-spline (see `_bspline_collocation`) evaluated on a `grid`-point lookup
+    table and then linearly interpolated -- the same table-plus-interpolate
+    treatment already used for F_gamma's histogram and for the final gather
+    back to actual weight values below, so it costs one more cheap gather,
+    not a slower assignment path.
 
     Returns F(w) in [0,1], same shape as `w`. Reconstruction never inverts F:
     like every other binning mode here, the codeword is the bin mean of the
@@ -202,10 +311,23 @@ def _companding_forward(w: torch.Tensor, alive: torch.Tensor, alpha: float,
     seg = slopes / m
     breakpoints = torch.cat([torch.zeros(1, device=u.device, dtype=seg.dtype),
                              torch.cumsum(seg, dim=0)])  # [M+1], 0 -> 1
-    pos = (f_base * m).clamp(0, m - 1e-6)
-    seg_idx = pos.floor().long().clamp(0, m - 1)
-    frac = pos - seg_idx.to(pos.dtype)
-    f_grid = breakpoints[seg_idx] + frac * slopes[seg_idx] / m
+
+    if residual_type == "linear":
+        pos = (f_base * m).clamp(0, m - 1e-6)
+        seg_idx = pos.floor().long().clamp(0, m - 1)
+        frac = pos - seg_idx.to(pos.dtype)
+        f_grid = breakpoints[seg_idx] + frac * slopes[seg_idx] / m
+    elif residual_type == "ispline":
+        basis = _bspline_collocation(m + 1, degree, grid).to(
+            device=breakpoints.device, dtype=breakpoints.dtype)  # [M+1, grid+1]
+        lookup = breakpoints @ basis  # [grid+1], the residual curve on its own grid
+        pos = (f_base * grid).clamp(0, grid)
+        idx0 = pos.floor().long().clamp(0, grid - 1)
+        idx1 = idx0 + 1
+        frac = (pos - idx0.to(pos.dtype)).clamp(0, 1)
+        f_grid = lookup[idx0] + frac * (lookup[idx1] - lookup[idx0])
+    else:
+        raise ValueError(f"unknown companding residual_type: {residual_type}")
     f_grid = f_grid.clamp(0.0, 1.0)
     f_grid[:, -1] = 1.0
 
@@ -265,6 +387,7 @@ def compress_layer(
     alpha: float | None = None,
     gamma: float | None = None,
     u=None,
+    z=None,
     force_zero: bool = False,
     reassign: bool = False,
     act_norm: torch.Tensor | None = None,
@@ -324,8 +447,11 @@ def compress_layer(
         if alpha is None or gamma is None or u is None:
             raise ValueError("companding binning requires alpha, gamma and u")
         u_t = torch.as_tensor(u, dtype=torch.float32, device=w.device)
-        f = _companding_forward(w, alive, float(alpha), float(gamma), u_t,
-                                grid=getattr(quant_cfg, "companding_grid", 256))
+        f = _companding_forward(
+            w, alive, float(alpha), float(gamma), u_t,
+            grid=getattr(quant_cfg, "companding_grid", 256),
+            residual_type=getattr(quant_cfg, "companding_residual_type", "linear"),
+            degree=getattr(quant_cfg, "companding_ispline_degree", 3))
         idx = _companding_assign(f, kc)
         cent, cnts = _centroids(w, idx, alive, kc)
         if reassign:
@@ -335,6 +461,13 @@ def compress_layer(
             cent = cent.clone()
             flat = cent.abs().argmin(dim=1)
             cent[torch.arange(cent.shape[0], device=cent.device), flat] = 0.0
+    elif quant_cfg.binning == "widths":
+        if z is None:
+            raise ValueError("widths binning requires z")
+        z_t = torch.as_tensor(z, dtype=torch.float32, device=w.device)
+        edges = _widths_edges(w, alive, kc, z_t)
+        idx = _assign(w, edges)
+        cent, cnts = _centroids(w, idx, alive, kc)
     else:
         raise ValueError(f"unknown binning: {quant_cfg.binning}")
 

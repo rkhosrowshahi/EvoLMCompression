@@ -51,7 +51,7 @@ _SPLIT = {"xlim": ("xlim_min", "xlim_max"), "ylim": ("ylim_min", "ylim_max")}
 _DROPPED = frozenset({"include_embeddings"})
 
 Granularity = Literal["per_tensor", "per_channel", "per_group"]
-Binning = Literal["uniform", "quantile", "kmeans", "companding"]
+Binning = Literal["uniform", "quantile", "kmeans", "companding", "widths"]
 Grouping = Literal["global", "type", "block", "block_type"]
 
 
@@ -148,14 +148,25 @@ class QuantConfig:
     # F_gamma is an analytic density-matched backbone estimated per codebook
     # group from its own histogram: lambda(x) ~ p(x)^gamma, the Bennett/
     # Panter-Dite family (gamma=0 uniform, 1/3 MSE-optimal, 1 max-entropy).
-    # F_residual is a monotone piecewise-linear correction on top, genome-
-    # controlled per K-group alongside gamma and the clip threshold alpha.
-    # See evolmc/quantize.py:_companding_forward and evolmc/grouping.py.
+    # F_residual is a monotone correction on top (linear or I-spline, see
+    # companding_residual_type below), genome-controlled per K-group alongside
+    # gamma and the clip threshold alpha. See evolmc/quantize.py's
+    # _companding_forward and evolmc/grouping.py.
     companding_alpha_min: float = 2.0   # clip threshold, in units of group std
     companding_alpha_max: float = 6.0
     companding_gamma_min: float = 0.0   # 0 -> uniform backbone
     companding_gamma_max: float = 1.0   # 1 -> equal-probability bins
-    companding_residual_genes: int = 6  # M piecewise-linear segments (genome)
+    companding_residual_genes: int = 6  # M control-point increments (genome)
+    # "linear" reads the M+1 non-decreasing control points as straight
+    # segments (closed form -- the original construction). "ispline" reads
+    # the same control points through a degree-`companding_ispline_degree`
+    # monotone B-spline instead (Ramsay's I-spline curve, built via the
+    # non-decreasing-control-points equivalence rather than the M-spline
+    # recursion -- see evolmc/quantize.py:_bspline_collocation). Genome
+    # layout and dimensionality are identical either way; only how the
+    # residual genes are read back into a curve changes.
+    companding_residual_type: Literal["linear", "ispline"] = "linear"
+    companding_ispline_degree: int = 3  # cubic; needs residual_genes >= this
     companding_grid: int = 256          # histogram / backbone resolution
     companding_reassign_iters: int = 3  # Lloyd passes when the reassign flag fires
     # Two boolean genes, force_zero and reassign, used to sit at the end of every warp group.
@@ -167,6 +178,36 @@ class QuantConfig:
     # Set true to decode a genome recorded BEFORE this change -- the old logs' n_var assumes
     # the wider layout and will not reshape otherwise.
     companding_flag_genes: bool = False
+
+    # -- width quantization (binning == "widths") ----------------------------
+    # The plain, backbone-free non-uniform quantizer: kc bin widths are genome
+    # genes directly, in the ORIGINAL weight domain -- no density estimate, no
+    # warp. Genes z live in [widths_log_lo, widths_log_hi]; widths come from
+    # l_i = (hi-lo) * exp(z_i) / sum(exp(z)), accumulated into kc left edges
+    # (evolmc/quantize.py:_widths_edges). This is the width-vs-threshold
+    # construction: widths need only positivity (exp) plus a sum-to-range
+    # normalization, so every gene keeps a fixed meaning under crossover --
+    # unlike raw sorted thresholds, which need sorting or a repair operator.
+    #
+    # The default range [-14, 2] is not an arbitrary box: the achievable
+    # max/min width ratio is bounded by exp(log_hi - log_lo) = exp(16) ~ 9e6,
+    # and concentrating most weights into one wide bin -- the entire mechanism
+    # that lets skewed occupancy beat balanced/MSE-optimal binning once an
+    # entropy coder is in the loop -- needs that ratio in the millions. A
+    # narrow or symmetric box silently caps how skewed the occupancy can get.
+    #
+    # The width gene block is sized to k_max_group.max(), not to any single
+    # K: K is itself a per-group evolved gene here exactly as it is for every
+    # other binning mode, so the genome must have room for the largest K any
+    # group could ever decode to. Only the first kc = (k-1 if pruning else k)
+    # genes are read for a given candidate; the rest sit unused whenever that
+    # candidate's K is smaller. Keep k_max modest for this mode (the DNN
+    # compression notes this recipe is based on found the same thing: a
+    # 512-wide budget searched directly is confined to CR <= 13.6, while 8-16
+    # free widths reach CR ~29 -- more genes are not free here, they are
+    # search bandwidth spent on bins that usually end up empty anyway).
+    widths_log_lo: float = -14.0
+    widths_log_hi: float = 2.0
 
 
 @dataclass

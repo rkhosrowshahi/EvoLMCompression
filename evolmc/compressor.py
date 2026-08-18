@@ -75,6 +75,7 @@ class Compressor:
         cost = ModelCost(n_untouched_weights=self.n_untouched)
 
         companding = self.cfg.quant.binning == "companding"
+        widths = self.cfg.quant.binning == "widths"
         for layer in self.targets:
             s = settings[layer.name]
             # 1-D norms/biases are quantized but never pruned: zeroing a
@@ -87,6 +88,8 @@ class Compressor:
                 extra = (round(s.alpha, 6), round(s.gamma, 6),
                          tuple(round(float(v), 6) for v in s.u),
                          s.force_zero, s.reassign)
+            elif widths:
+                extra = tuple(round(float(v), 6) for v in s.widths_z)
             key = self.cache.key(layer.name, s.k, t_lo, t_hi, extra)
             hit = self.cache.get(key)
             if hit is not None:
@@ -104,6 +107,7 @@ class Compressor:
                     alpha=s.alpha,
                     gamma=s.gamma,
                     u=s.u,
+                    z=s.widths_z,
                     force_zero=s.force_zero,
                     reassign=s.reassign,
                     act_norm=self.wanda_norms.get(layer.name) if self.wanda_norms else None,
