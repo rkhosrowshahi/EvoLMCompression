@@ -257,11 +257,12 @@ def run_search(problem, cfg, run, resume_from: str | None = None):
     metrics = tuple(problem.report_metrics)
     cols = list(objset.names) + list(metrics)
     W = 17
+    SW = 12  # survival-count column width
     run.log(f"\n{'':>25}{'ideal / nadir over the front':<{W * len(cols)}}")
     run.log(f"{'gen':>5}{'evals':>8}{'front_size':>12}"
             + "".join(c[:W - 2].rjust(W) for c in cols)
-            + f"{'HV':>9}{'sec':>8}")
-    run.log("-" * (25 + W * len(cols) + 17))
+            + f"{'HV':>9}{'sec':>8}{'surv_pop':>{SW}}{'surv_front':>{SW}}")
+    run.log("-" * (25 + W * len(cols) + 17 + 2 * SW))
 
     history, records = [], []
     while algorithm.has_next():
@@ -274,6 +275,17 @@ def run_search(problem, cfg, run, resume_from: str | None = None):
 
         X_pop = algorithm.pop.get("X")
         X_front = algorithm.opt.get("X")
+        # `algorithm.off` is this generation's offspring (advance() sets it
+        # unconditionally, gen 1 included, where "offspring" is just the
+        # sampled initial population -- see Algorithm.advance). Population is
+        # a numpy object-array of Individual instances, and environmental
+        # selection only ever SELECTS existing ones into pop/opt (`pop[survivors]`
+        # in RankAndCrowding._do) -- it never copies or recomputes them -- so
+        # Python object identity is an exact, dependency-free membership test.
+        off = algorithm.off if algorithm.off is not None else algorithm.pop[:0]
+        n_off = len(off)
+        n_surv_pop = _survivor_count(off, algorithm.pop)
+        n_surv_front = _survivor_count(off, algorithm.opt)
         # Everything below here is REAL space: the sign flip that makes a
         # maximized objective minimizable belongs to pymoo, not to the log,
         # the figures or the stored front.
@@ -315,6 +327,9 @@ def run_search(problem, cfg, run, resume_from: str | None = None):
             "hypervolume": hv_now,
             "seconds": round(dt, 2),
             "front": [[float(v) for v in row] for row in F_front],
+            "n_offspring": n_off,
+            "n_offspring_survived_pop": n_surv_pop,
+            "n_offspring_survived_front": n_surv_front,
         }
         # Kept so the existing readers of generations.jsonl keep working.
         rec["best_ppl"] = best.get(objset[0].name)
@@ -326,7 +341,9 @@ def run_search(problem, cfg, run, resume_from: str | None = None):
         cells += [_pair(*mvals[m]) if m in mvals else "-" for m in metrics]
         run.log(f"{gen:>5}{comp.n_evals:>8}{len(F_front):>12}"
                 + "".join(c.rjust(W) for c in cells)
-                + f"{hv_now:>9.4f}{dt:>8.1f}", echo=True)
+                + f"{hv_now:>9.4f}{dt:>8.1f}"
+                + f"{f'{n_surv_pop}/{n_off}':>{SW}}"
+                + f"{f'{n_surv_front}/{n_off}':>{SW}}", echo=True)
 
         if cfg.log.save_history:
             # X and F stay in the algorithm's own space so a checkpoint and its
@@ -386,6 +403,20 @@ def run_search(problem, cfg, run, resume_from: str | None = None):
     if cfg.log.save_history and history:
         save_history(run.file("data", "history.npz"), history, run)
     return res, records
+
+
+def _survivor_count(offspring, target) -> int:
+    """How many `offspring` Individuals are also members of `target`, by
+    Python object identity.
+
+    Environmental selection (e.g. RankAndCrowding._do's `pop[survivors]`)
+    only ever SELECTS existing Individual objects into the next population
+    or front -- it never copies or recomputes them -- so `id()` is an exact
+    membership test, with no dependency on X happening to be unique or on
+    any pymoo-internal bookkeeping.
+    """
+    target_ids = {id(ind) for ind in target}
+    return sum(1 for ind in offspring if id(ind) in target_ids)
 
 
 def _num(v: float) -> str:
