@@ -298,6 +298,31 @@ class Genome:
             x[self.n_k : self.n_k + 2 * self.n_p] = np.clip(frac, 0.0, 1.0)
         return x
 
+    def _prune_sweep(self, n: int) -> np.ndarray:
+        """`n` pruning-threshold values from 0 to `t_max`, for seeding gen 0.
+
+        `sigma` and `wanda` thresholds are already tempered -- sigma by each
+        row's own scale, wanda by being a sparsity fraction directly -- so a
+        LINEAR sweep spreads them reasonably evenly across achieved sparsity.
+
+        `raw` thresholds are one fixed weight-value band broadcast identically
+        across every row (quantize.py: `torch.full_like(row_scale, t_lo)`),
+        with no local rescaling to temper GPT-2's heavy tails. A linear sweep
+        then saturates almost immediately -- empirically, t=0.2 of a typical
+        t_max=1.0 already prunes ~89% of a target layer -- so most of gen 0
+        starts from "everything pruned," the same failure a linear K sweep
+        would cause and the same fix applies: sweep in log space instead, so
+        low thresholds (and therefore low-to-moderate sparsity) actually get
+        population coverage. `t=0` (no pruning) is kept explicitly, the same
+        way `encode_uniform` always includes a true baseline point.
+        """
+        if self.prune.mode != "raw" or self.prune.t_max <= 0 or n < 2:
+            return np.linspace(0.0, self.prune.t_max, n)
+        eps = self.prune.t_max * 1e-3
+        ts = np.geomspace(eps, self.prune.t_max, n)
+        ts[0] = 0.0
+        return ts
+
     def seed_population(self, pop_size, rng, mode: str = "logspace") -> np.ndarray:
         """Build generation 0.
 
@@ -315,6 +340,12 @@ class Genome:
 
         Groups whose ceiling is below a target K sit at their own maximum, so a
         `logspace` individual is uniform wherever uniformity is reachable.
+
+        The pruning band is swept too (see `_prune_sweep`), log-spaced rather
+        than linear when `prune.mode == "raw"`, for the same reason K is
+        already log-spaced: a linear sweep over a badly-scaled threshold piles
+        the population into one corner of the objective space instead of
+        spanning it.
         """
         if mode == "random":
             return rng.random((pop_size, self.n_var))
@@ -324,7 +355,7 @@ class Genome:
             if self.n_p:
                 mid = self.k_choices[len(self.k_choices) // 2]
                 seeds += [self.encode_uniform(mid, t) for t in
-                          np.linspace(0.0, self.prune.t_max, 4)[1:]]
+                          self._prune_sweep(4)[1:]]
             seeds = seeds[:pop_size]
             n_rand = max(0, pop_size - len(seeds))
             if n_rand:
@@ -344,7 +375,7 @@ class Genome:
         if self.n_p:
             # Sweep the pruning band across the population too, so generation 0
             # spans both objectives' extremes rather than only the K axis.
-            ts = np.linspace(0.0, self.prune.t_max, pop_size)
+            ts = self._prune_sweep(pop_size)
             for i, t in enumerate(ts):
                 frac = 0.0 if self.prune.t_max <= 0 else t / self.prune.t_max
                 pop[i, self.n_k : self.n_k + 2 * self.n_p] = np.clip(frac, 0.0, 1.0)
