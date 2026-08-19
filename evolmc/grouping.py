@@ -105,7 +105,26 @@ class Genome:
         self.quant = quant_cfg
         self.prune = prune_cfg
         self.k_encoding = getattr(quant_cfg, "k_encoding", "choices")
-        if self.k_encoding == "integer":
+        self.k_fixed = getattr(quant_cfg, "k_fixed", None)
+        if self.k_fixed is not None:
+            # Pinned K: no range to encode, so k_encoding/k_min/k_max/
+            # k_choices below are bypassed entirely. k_choices still ends up
+            # a (degenerate, one-element) tuple because baseline_sweep,
+            # plotting.derive_limits and encode_uniform all iterate/index it
+            # rather than knowing about k_fixed specially -- one baseline
+            # point / one xlim pair is exactly right when K cannot vary.
+            self.k_fixed = int(self.k_fixed)
+            if self.k_fixed < 2:
+                raise ValueError(f"k_fixed must be >= 2, got {self.k_fixed}")
+            # k_min stays the universal floor (2), NOT k_fixed: it is reused
+            # below as the per-layer clamp's safety floor (`k = max(cap,
+            # self.k_min)`), which must still let a too-small layer fall all
+            # the way down to its real cap instead of being pulled back up
+            # to k_fixed. k_max = k_fixed is what actually sets each group's
+            # ceiling.
+            self.k_min, self.k_max = 2, self.k_fixed
+            self.k_choices = (self.k_fixed,)
+        elif self.k_encoding == "integer":
             self.k_min, self.k_max = int(quant_cfg.k_min), int(quant_cfg.k_max)
             if self.k_min < 2 or self.k_max <= self.k_min:
                 raise ValueError(f"need 2 <= k_min < k_max, got "
@@ -121,14 +140,19 @@ class Genome:
             self.k_min, self.k_max = self.k_choices[0], self.k_choices[-1]
 
         self.k_groups, self.k_assign = build_groups(layers, var_cfg.k_grouping)
-        self.n_k = len(self.k_groups)
+        self.n_groups = len(self.k_groups)
+        # K is a decision variable only when it is not pinned -- fixing it
+        # drops its genes from the genome rather than merely constraining
+        # them to decode to one value, so a k_fixed run spends every gene
+        # on what is actually being searched.
+        self.n_k = 0 if self.k_fixed is not None else self.n_groups
 
         # A group's ceiling is the MINIMUM over its 2-D member layers: one K
         # has to be valid for every matrix the group covers. With `block`
         # grouping a block's narrowest layer sets the limit for all four.
         # 1-D norms/biases are clamped per layer in decode instead -- a 768-wide
         # LayerNorm must not drag a shared K down from 8192 to 768.
-        caps = np.full(self.n_k, self.k_max, dtype=np.int64)
+        caps = np.full(self.n_groups, self.k_max, dtype=np.int64)
         for layer in layers:
             if layer.is_vector:
                 continue
@@ -154,7 +178,7 @@ class Genome:
             self.warp_m = int(getattr(quant_cfg, "companding_residual_genes", 6))
             self.warp_flags = bool(getattr(quant_cfg, "companding_flag_genes", False))
             self.warp_dim = 2 + self.warp_m + (2 if self.warp_flags else 0)
-            self.n_w = self.n_k
+            self.n_w = self.n_groups
             self.alpha_min = float(getattr(quant_cfg, "companding_alpha_min", 2.0))
             self.alpha_max = float(getattr(quant_cfg, "companding_alpha_max", 6.0))
             self.gamma_min = float(getattr(quant_cfg, "companding_gamma_min", 0.0))
@@ -170,7 +194,7 @@ class Genome:
         # unused tail (see decode(), which reads only the first kc genes).
         self.widths = (getattr(quant_cfg, "binning", "uniform") == "widths")
         if self.widths:
-            self.n_ws = self.n_k
+            self.n_ws = self.n_groups
             self.width_dim = int(self.k_max_group.max())
             self.width_log_lo = float(getattr(quant_cfg, "widths_log_lo", -14.0))
             self.width_log_hi = float(getattr(quant_cfg, "widths_log_hi", 2.0))
@@ -178,6 +202,8 @@ class Genome:
             self.n_ws = self.width_dim = 0
 
         # Layout: [K vars ...][t_lo vars ...][t_hi vars ...][warp vars ...][width vars ...]
+        # The K block is empty (n_k == 0) whenever quant.k_fixed pins the
+        # codebook size instead of searching it.
         self.n_var = (self.n_k + 2 * self.n_p + self.n_w * self.warp_dim
                      + self.n_ws * self.width_dim)
 
@@ -188,7 +214,8 @@ class Genome:
 
     def decode(self, x: np.ndarray) -> dict[str, LayerSetting]:
         x = np.clip(np.asarray(x, dtype=float), 0.0, 1.0)
-        k_per_group = self._decode_k(x[: self.n_k])
+        k_per_group = (self._decode_k(x[: self.n_k]) if self.n_k
+                       else [self.k_fixed] * self.n_groups)
 
         if self.n_p:
             lo = x[self.n_k : self.n_k + self.n_p] * self.prune.t_max
@@ -287,11 +314,13 @@ class Genome:
     def encode_uniform(self, k: int, t: float = 0.0) -> np.ndarray:
         """A genome with the same K everywhere -- used for warm starts and for
         the fixed-bit baselines the paper compares against."""
+        if self.k_fixed is not None and int(k) != self.k_fixed:
+            raise ValueError(f"K is fixed at {self.k_fixed}; cannot encode K={k}")
         if self.k_encoding == "integer" and not self.k_min <= k <= self.k_max:
             raise ValueError(f"K={k} outside [{self.k_min}, {self.k_max}]")
         x = np.zeros(self.n_var)
         # Per group, because ceilings differ: a group that cannot reach `k`
-        # sits at its own maximum instead.
+        # sits at its own maximum instead. No-ops when K is fixed (n_k == 0).
         x[: self.n_k] = [self._encode_k(int(k), g) for g in range(self.n_k)]
         if self.n_p:
             frac = 0.0 if self.prune.t_max <= 0 else t / self.prune.t_max
@@ -366,6 +395,19 @@ class Genome:
         if mode != "logspace":
             raise ValueError(f"unknown init mode: {mode}")
 
+        if self.n_k == 0 or self.k_min == self.k_max:
+            # No K range to spread across -- either K has no genes at all
+            # (quant.k_fixed: self.k_min stays the universal floor of 2, so
+            # it no longer equals self.k_max here, hence checking n_k
+            # directly) or K has genes but only one reachable value (a
+            # singleton k_choices). Either way every entry of `ks` below
+            # would be identical, so logspace would seed pop_size COPIES of
+            # the same individual (same K, all-zero widths/warp/pruning
+            # genes) instead of a diverse generation 0. Random genes still
+            # respect however K is pinned while actually spanning whatever
+            # IS being searched.
+            return rng.random((pop_size, self.n_var))
+
         # Even in log2(K), i.e. even in index bits.
         ks = np.rint(np.exp2(np.linspace(math.log2(self.k_min),
                                          math.log2(self.k_max),
@@ -384,11 +426,14 @@ class Genome:
     # -- reporting --------------------------------------------------------
 
     def describe(self) -> str:
-        lines = [
-            f"decision variables : {self.n_var}",
-            f"  K groups         : {self.n_k} ({', '.join(self.k_groups[:8])}"
-            + (" ..." if self.n_k > 8 else "") + ")",
-        ]
+        if self.n_k:
+            k_line = (f"  K groups         : {self.n_groups} "
+                      f"({', '.join(self.k_groups[:8])}"
+                      + (" ..." if self.n_groups > 8 else "") + ")")
+        else:
+            k_line = (f"  K                : fixed at {self.k_fixed} across "
+                      f"{self.n_groups} groups (not searched)")
+        lines = [f"decision variables : {self.n_var}", k_line]
         if self.n_p:
             lines.append(f"  pruning groups   : {self.n_p} x 2 vars")
         else:
@@ -403,7 +448,9 @@ class Genome:
             lines.append(f"  bin widths       : {self.n_ws} groups x "
                          f"{self.width_dim} vars (log-width genes, "
                          f"z in [{self.width_log_lo:g}, {self.width_log_hi:g}])")
-        if self.k_encoding == "integer":
+        if not self.n_k:
+            pass  # k_encoding is inert once k_fixed pins the codebook size
+        elif self.k_encoding == "integer":
             lines.append(f"  K encoding       : integer, log-spaced in "
                          f"[{self.k_min}, {self.k_max}] "
                          f"({math.log2(self.k_min):.0f}-"

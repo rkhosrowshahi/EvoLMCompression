@@ -108,6 +108,26 @@ class QuantConfig:
     # Also supplies the reference points and warm-start seeds in either
     # encoding, so the baselines stay at interpretable powers of two.
     k_choices: tuple[int, ...] = (2, 4, 8, 16, 32, 64, 128, 256)
+    # Pin K to one value for every group and remove it from the genome
+    # entirely, instead of letting NSGA-II trade codebook size against
+    # everything else. k_encoding/k_min/k_max/k_choices are ignored when
+    # this is set -- k_choices collapses to the single-element (k_fixed,)
+    # and the K block of the genome (grouping.py Genome.n_k) drops to zero
+    # width, so every gene goes to what is actually being searched (bin
+    # widths, the companding warp, or pruning).
+    #
+    # Matters most for binning == "widths": there K doubles as the width
+    # gene block's size (width_dim = k_max_group.max(), grouping.py), so
+    # searching K forces that block to be padded to the largest K any
+    # candidate could reach. Fixing K removes the padding -- every width
+    # gene is live for every individual -- and matches how DNN compression
+    # /REPORT.md actually ran the width search: fix the bin count (their
+    # "D"), search only the widths, and sweep D by running separate
+    # configs rather than co-evolving it.
+    #
+    # To sweep K under this mode, run one config per value rather than
+    # letting a single run search it.
+    k_fixed: int | None = None
     # Bit width used to store each codebook entry.
     codebook_bits: int = 16
     # How the DEPLOYABLE side stores indices. This decides whether pruning is

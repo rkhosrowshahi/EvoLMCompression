@@ -239,3 +239,92 @@ def test_only_the_first_kc_width_genes_are_read():
     mse_short = _compress(w, k=kc, z=z_short)[1].mse
     mse_long = _compress(w, k=kc, z=z_long_same_prefix)[1].mse
     assert mse_short == pytest.approx(mse_long)
+
+
+# -- Genome: quant.k_fixed (K pinned, dropped from the genome) ---------------
+#
+# Binning-agnostic (grouping.py), but exercised here because it matters most
+# for "widths": K also sizes the width gene block (width_dim =
+# k_max_group.max()), so searching K over a wide range forces that block to
+# be padded to the largest K any candidate could reach. k_fixed removes the
+# padding by removing K from the genome entirely.
+
+def test_k_fixed_removes_k_from_the_genome():
+    cfg = _cfgs(prune={"enabled": False})
+    cfg.quant.k_fixed = 16
+    layers = _layers()
+    g = Genome(layers, cfg.quant, cfg.prune, cfg.variables)
+    assert g.n_k == 0
+    assert g.n_groups == 2  # k_grouping="type" default -- groups still exist
+    assert g.k_choices == (16,)
+    assert g.width_dim == 16  # no padding: every candidate has the same K
+    assert g.n_var == g.n_ws * g.width_dim  # no K genes at all
+
+
+def test_k_fixed_decodes_every_layer_to_the_fixed_k():
+    cfg = _cfgs(prune={"enabled": False})
+    cfg.quant.k_fixed = 16
+    layers = _layers()
+    g = Genome(layers, cfg.quant, cfg.prune, cfg.variables)
+    rng = np.random.default_rng(0)
+    settings = g.decode(rng.random(g.n_var))
+    assert all(s.k == 16 for s in settings.values())
+
+
+def test_k_fixed_respects_the_per_layer_cap():
+    """A layer too small to fill K=16 still clamps down, same as a searched K
+    -- k_fixed must not pull it back up via the per-layer clamp's own safety
+    floor (that floor is the universal minimum of 2, not k_fixed)."""
+    cfg = _cfgs(prune={"enabled": False})
+    cfg.quant.k_fixed = 16
+    cfg.quant.granularity = "per_tensor"  # cap = n_weights, unambiguously
+    tiny = TargetLayer("m.layers.0.tiny", torch.nn.Linear(2, 2), 4, 2, 2, 0,
+                       "tiny", False)
+    g = Genome([tiny], cfg.quant, cfg.prune, cfg.variables)
+    s = g.decode(np.zeros(g.n_var))["m.layers.0.tiny"]
+    assert s.k == 4  # capped to n_weights, not the nominal 16
+
+
+def test_k_fixed_rejects_encode_uniform_mismatch():
+    cfg = _cfgs(prune={"enabled": False})
+    cfg.quant.k_fixed = 16
+    g = Genome(_layers(), cfg.quant, cfg.prune, cfg.variables)
+    with pytest.raises(ValueError, match="fixed"):
+        g.encode_uniform(8)
+    g.encode_uniform(16)  # matching K is fine
+
+
+def test_k_fixed_seed_population_logspace_falls_back_to_random():
+    """logspace normally spreads K in log space; with nothing to spread (K
+    fixed), it must not seed pop_size copies of the same all-zero genome --
+    that would start every individual at equal-width bins with zero gen-0
+    diversity in what is actually being searched."""
+    cfg = _cfgs(prune={"enabled": False})
+    cfg.quant.k_fixed = 16
+    g = Genome(_layers(), cfg.quant, cfg.prune, cfg.variables)
+    rng = np.random.default_rng(0)
+    pop = g.seed_population(8, rng, mode="logspace")
+    assert pop.shape == (8, g.n_var)
+    assert len(np.unique(pop, axis=0)) > 1
+
+
+def test_k_fixed_requires_at_least_two():
+    cfg = _cfgs(prune={"enabled": False})
+    cfg.quant.k_fixed = 1
+    with pytest.raises(ValueError, match="k_fixed"):
+        Genome(_layers(), cfg.quant, cfg.prune, cfg.variables)
+
+
+def test_k_fixed_leaves_other_binning_modes_unaffected():
+    """Not widths-specific: the same K-vars-become-zero behaviour holds for
+    plain uniform binning, since decode()'s K handling never looks at
+    quant.binning."""
+    cfg = Config()
+    assert cfg.quant.binning == "uniform"
+    cfg.quant.k_fixed = 8
+    cfg.prune.enabled = False
+    g = Genome(_layers(), cfg.quant, cfg.prune, cfg.variables)
+    assert g.n_k == 0
+    assert g.n_var == 0  # no K, no pruning, no widths/warp genes at all
+    settings = g.decode(np.zeros(0))
+    assert all(s.k == 8 for s in settings.values())

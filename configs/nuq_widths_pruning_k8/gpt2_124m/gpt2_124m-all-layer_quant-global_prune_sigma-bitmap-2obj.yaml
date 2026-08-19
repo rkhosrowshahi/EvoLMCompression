@@ -1,0 +1,85 @@
+model:
+  name: gpt2
+  dtype: float16
+  device: cuda
+  master_device: cuda
+  exclude_patterns: []
+  include_1d: true
+
+quant:
+  deployable_format: bitmap
+  granularity: per_tensor
+  per_channel_patterns: [wte]
+  binning: widths
+  k_fixed: 8
+  codebook_bits: 16
+  cache_entries: 32
+  widths_log_lo: -14.0
+  widths_log_hi: 2.0
+
+prune:
+  enabled: true
+  mode: sigma
+  t_max: 2.0
+  reserve_zero_codeword: true
+
+variables:
+  k_grouping: block_type
+  prune_grouping: global
+
+data:
+  calib_dataset: c4
+  eval_dataset: wikitext2
+  seqlen: 1024
+  n_proxy_seq: 8
+  n_eval_seq: 128
+
+search:
+  algorithm: nsga2
+  pop_size: 100
+  n_gen: 100
+  seed: 0
+  init: ladder
+  warm_start: true
+  baseline_sweep: true
+  size_objective: avg_bits
+
+  crossover_prob: 0.9
+  crossover_prob_var: 1.0
+  crossover_eta: 15
+  mutation_prob: 0.9
+  mutation_prob_var: 0.9
+  mutation_eta: 20
+  eliminate_duplicates: true
+  n_offsprings: null
+  ref_dir_partitions: null
+  moead_neighbors: 15
+  moead_prob_neighbor_mating: 0.7
+
+log:
+  root: logs
+  run_name: gpt2_124m-widths-all-layer_quant-global_prune_sigma-bitmap-2obj-np100-ng100-k8
+  checkpoint_every: 10
+  save_history: true
+
+plot:
+  xlim_min: 1.0
+  enabled: true
+  every: 1
+  formats: [png, pdf]
+  dpi: 150
+  style: paper
+  yscale: log
+  ylim_min: 1.0
+  ylim_min_ratio: 0.8
+  ylim_pad: 0.03
+  ylim_max: null
+  ylim_max_ratio: null
+  legend_alpha: 0.3
+  marker_pt: 3.5
+  baseline_label: exponential search (baseline)
+  annotation_pt: null
+  venue: ieee
+  width: column
+  video: [mp4, gif]
+  video_fps: 6
