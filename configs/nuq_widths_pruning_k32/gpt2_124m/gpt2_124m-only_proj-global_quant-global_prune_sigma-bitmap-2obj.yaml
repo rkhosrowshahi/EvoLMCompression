@@ -37,10 +37,21 @@ search:
   pop_size: 100
   n_gen: 100
   seed: 0
+
+  # avg_bits (deployable, fixed-width indices) is a hard CONSTANT under
+  # k_fixed with k_grouping: global -- ceil(log2(k_nominal)) + codebook bits
+  # is identical for every individual regardless of how the width genes
+  # shape bin occupancy, so it gives the search zero signal. avg_bits_archival
+  # (Huffman-coded) is what actually responds to the width genes, since it
+  # prices the skewed symbol distribution they produce -- that skew
+  # exploitation is the mechanism DNN compression/REPORT.md's method relies
+  # on, so it needs to be the objective being optimized.
+  objectives: [ppl_proxy, avg_bits_archival]
+
   init: ladder
   warm_start: true
   baseline_sweep: true
-  size_objective: avg_bits
+  size_objective: avg_bits_archival
 
   crossover_prob: 0.9
   crossover_prob_var: 1.0
