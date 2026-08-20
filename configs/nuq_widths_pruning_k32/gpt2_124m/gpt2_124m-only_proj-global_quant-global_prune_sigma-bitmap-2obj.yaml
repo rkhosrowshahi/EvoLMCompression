@@ -39,9 +39,11 @@ search:
   seed: 0
 
   # avg_bits (deployable, fixed-width indices) is a hard CONSTANT under
-  # k_fixed with k_grouping: global -- ceil(log2(k_nominal)) + codebook bits
-  # is identical for every individual regardless of how the width genes
-  # shape bin occupancy, so it gives the search zero signal. avg_bits_archival
+  # k_fixed: ceil(log2(k_nominal)) + codebook bits is identical for every
+  # individual regardless of how the width genes shape bin occupancy, so it
+  # gives the search zero signal (worst case zero for k_grouping: global,
+  # still effectively zero for block/layer since GPT-2's real layers never
+  # trigger the per-layer K cap that could otherwise vary it). avg_bits_archival
   # (Huffman-coded) is what actually responds to the width genes, since it
   # prices the skewed symbol distribution they produce -- that skew
   # exploitation is the mechanism DNN compression/REPORT.md's method relies
