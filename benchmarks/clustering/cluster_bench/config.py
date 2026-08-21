@@ -77,6 +77,14 @@ class BaselineCfg:
     #: costs more than the row is worth. Rows above the cap are simply absent
     #: from the matched table; the front itself still reports them.
     match_k_cap: int = 512
+    #: Fit scikit-learn only on the K ladder, not at every matched K. It was
+    #: True while the three arms were collapsed into a best-of-three envelope,
+    #: where a coarser grid for the slowest arm cost nothing. Now that each arm
+    #: is REPORTED SEPARATELY that shortcut would be a rigged comparison --
+    #: sklearn would be drawing its best from ~10 cluster counts while dp and
+    #: Lloyd drew theirs from ~60. Default False; set True only to save time on
+    #: a run whose sklearn column you do not intend to quote.
+    sklearn_ladder_only: bool = False
 
 
 @dataclass

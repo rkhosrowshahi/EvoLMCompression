@@ -171,6 +171,38 @@ def companding_assign(f: np.ndarray, k: int) -> np.ndarray:
     return np.clip((f * k).astype(np.int64), 0, k - 1)
 
 
+def companding_edges(x: np.ndarray, k: int, alpha: float, gamma: float,
+                     u: np.ndarray, residual_type: str = "linear",
+                     degree: int = 3):
+    """The decision boundaries in the DATA domain, for plotting.
+
+    Assignment is `floor(K F(x))`, so bin j opens where `F(x) = j/K`, and since
+    F is non-decreasing the edge can be read off by inverting it.
+
+    F is inverted through the DATA POINTS, not through a uniform grid over the
+    data range. That is not an optimisation, it is the only correct way here:
+    `companding_forward` estimates its density histogram from whatever array it
+    is handed, so evaluating it on a uniform grid fits the warp to the grid --
+    a uniform density -- and returns boundaries for a quantizer that was never
+    run. (Measured while writing this: it put an edge at 1.61 where the real
+    one is at 0.54.) Sorting the data and interpolating against F at those same
+    points is exactly consistent with the assignment.
+
+    Returns the interior edges falling strictly inside the data range. Edges
+    outside are dropped rather than clamped: a bin no point can reach is not a
+    visible boundary, and drawing it at the axis limit would suggest structure
+    that is not there.
+    """
+    x = np.asarray(x, dtype=np.float64).ravel()
+    order = np.argsort(x)
+    xs = x[order]
+    f = companding_forward(x, alpha, gamma, np.asarray(u), 256,
+                           residual_type, degree)[order]
+    edges = np.interp(np.arange(1, k) / k, f, xs)
+    inside = (edges > xs[0] + 1e-12) & (edges < xs[-1] - 1e-12)
+    return np.unique(edges[inside])
+
+
 def compact_labels(x: np.ndarray, idx: np.ndarray):
     """Drop empty bins, relabel 0..K_eff-1, return (labels, centroids).
 

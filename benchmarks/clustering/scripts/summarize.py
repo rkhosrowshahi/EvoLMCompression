@@ -19,7 +19,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from cluster_bench.report import _fmt, _render, format_suite_tables  # noqa: E402
+from cluster_bench.report import (_fmt, _render,  # noqa: E402
+                                  format_per_arm_tables,
+                                  format_suite_tables)
 
 MATCHED_HEAD = ["clusters", "best k-means arm", "MSE k-means", "MSE companding",
                 "extra error", "DB k-means", "DB companding", "bits k-means",
@@ -62,6 +64,8 @@ def main():
             continue
         summaries = json.loads(path.read_text())
         print(f"\n## {run.name}\n" if args.markdown else f"\n=== {run.name} ===\n")
+        print(format_per_arm_tables(summaries, args.markdown))
+        print()
         print(format_suite_tables(summaries, args.markdown))
 
         if args.matched:

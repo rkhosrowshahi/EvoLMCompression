@@ -186,3 +186,73 @@ def test_min_cluster_size_is_reported_for_balanced_partitions():
     m = evaluate(x, labels, cent, with_silhouette=False)
     assert m["min_cluster_size"] == 50
     assert m["min_cluster_frac"] == pytest.approx(0.5)
+
+
+def test_hypervolume_is_a_fraction_of_the_reference_box():
+    """It must land in [0, 1] whatever the objective count.
+
+    Before this was fixed the measure ran to ref**m -- 1.21 on two objectives,
+    1.331 on three -- so a "coverage" column printed 1.157, and two runs
+    optimizing different numbers of objectives were not on the same scale.
+    """
+    for m in (2, 3):
+        ideal, nadir = np.zeros(m), np.ones(m)
+        at_ideal = report.hypervolume(np.zeros((1, m)), ideal, nadir)
+        at_nadir = report.hypervolume(np.ones((1, m)), ideal, nadir)
+        assert at_ideal == pytest.approx(1.0), m
+        assert 0.0 < at_nadir < 0.02, m
+        assert report.hypervolume(np.empty((0, m)), ideal, nadir) == 0.0
+
+
+def test_hypervolume_still_orders_fronts_correctly():
+    ideal, nadir = np.array([0.0, 0.0]), np.array([1.0, 1.0])
+    better = report.hypervolume(np.array([[0.1, 0.1]]), ideal, nadir)
+    worse = report.hypervolume(np.array([[0.9, 0.9]]), ideal, nadir)
+    assert 1.0 >= better > worse > 0.0
+
+
+def test_fast_pareto_sweep_matches_the_pairwise_definition():
+    """The two-objective sweep must agree with the O(n^2) form, duplicates included.
+
+    Exact duplicates are the trap: neither of an identical pair dominates the
+    other, so a strict left-to-right comparison would wrongly discard the second
+    copy. The archive is full of them -- the K gene decodes through a rounding
+    step, so different genomes routinely score identically.
+    """
+    def pairwise(f):
+        return np.array([
+            not (np.all(f <= f[i], axis=1) & np.any(f < f[i], axis=1)).any()
+            for i in range(len(f))])
+
+    rng = np.random.default_rng(0)
+    for _ in range(200):
+        f = rng.integers(0, 5, size=(int(rng.integers(1, 40)), 2)).astype(float)
+        assert np.array_equal(report.nondominated(f), pairwise(f))
+
+    # And the general path is still exercised for three objectives.
+    f3 = rng.random((60, 3))
+    assert np.array_equal(report.nondominated(f3), pairwise(f3))
+
+
+def test_pretty_name_spells_out_the_known_datasets():
+    """Titles a reader would accept: acronyms, surnames and families intact."""
+    assert report.pretty_name("gmm5_unbalanced") == "GMM5 Unbalanced"
+    assert report.pretty_name("dim32") == "DIM-32"
+    assert report.pretty_name("student_t3") == "Student-t (df 3)"
+    assert report.pretty_name("lognormal") == "Log-normal"
+    assert report.pretty_name("s_set_k15") == "S-Set (K=15)"
+    # Every dataset the suites can produce must have a spelled-out name, or a
+    # figure ends up titled "Gmm5_unbalanced".
+    from cluster_bench.datasets import SUITE_1D, SUITE_MD
+    named = set(report.DISPLAY_NAMES)
+    for n in SUITE_1D:
+        assert n in named, n
+    for n in SUITE_MD:
+        assert n in named or any(k.startswith(n) for k in named), n
+
+
+def test_pretty_name_falls_back_to_grammatical_title_case():
+    assert report.pretty_name("some_new_set_of_blobs") == "Some New Set of Blobs"
+    assert report.pretty_name("ARI_check") == "ARI Check"   # acronym preserved
+    assert report.pretty_name("the_end") == "The End"       # minor word leads
+    assert report.pretty_name("") == ""

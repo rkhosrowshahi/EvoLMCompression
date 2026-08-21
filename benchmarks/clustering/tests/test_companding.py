@@ -10,7 +10,7 @@ import numpy as np
 import pytest
 
 from cluster_bench.companding import (_residual_curve, companding_assign,
-                                      companding_forward,
+                                      companding_edges, companding_forward,
                                       companding_quantize_1d,
                                       companding_quantize_md)
 from cluster_bench.metrics import sse
@@ -120,3 +120,29 @@ def test_degenerate_input_does_not_crash():
                                           np.zeros(6))
     assert cent.shape[0] == 1
     assert np.isfinite(cent).all()
+
+
+@pytest.mark.parametrize("name", ["gaussian", "laplace", "bimodal"])
+@pytest.mark.parametrize("k", [3, 8, 16])
+def test_recovered_edges_sit_at_the_realised_transitions(name, k):
+    """`companding_edges` must invert the SAME warp the assignment used.
+
+    The first version inverted F sampled on a uniform grid over the data range.
+    `companding_forward` estimates its density histogram from whatever array it
+    is given, so that fitted the warp to the grid -- a uniform density -- and
+    returned boundaries for a quantizer that never ran: an edge at 1.61 where
+    the true one was at 0.54. Only a plot would have shown it, and only if
+    someone looked closely.
+    """
+    x = SAMPLES[name]
+    u = np.linspace(-1, 1, 6)
+    labels, _ = companding_quantize_1d(x, k, 4.0, 0.6, u)
+    edges = companding_edges(x, k, 4.0, 0.6, u)
+
+    order = np.argsort(x)
+    xs, ls = x[order], labels[order]
+    assert np.all(np.diff(ls) >= 0), "1-D bins must be intervals"
+    gaps = [(xs[i], xs[i + 1]) for i in np.flatnonzero(np.diff(ls) != 0)]
+    assert len(edges) == len(gaps)
+    for e in edges:
+        assert any(a - 1e-9 <= e <= b + 1e-9 for a, b in gaps), e

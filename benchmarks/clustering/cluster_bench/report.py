@@ -23,11 +23,87 @@ its hypervolume with a corner point that means nothing.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 
 from .metrics import WORST_DB, WORST_SIL
 
 _DEGENERATE = {"davies_bouldin": WORST_DB, "neg_silhouette": WORST_SIL}
+
+
+#: Display names for figure titles. Spelled out rather than derived, because a
+#: mechanical title-caser gets these wrong in ways a reader notices: GMM and DIM
+#: are acronyms, Laplace and Student are surnames, "lognormal" is hyphenated in
+#: the literature, and the S-/A-/DIM-set families carry their K in the name. The
+#: raw identifier still names the results directory and every CSV, so nothing
+#: here breaks the path from a figure back to its numbers.
+DISPLAY_NAMES = {
+    "gaussian": "Gaussian",
+    "laplace": "Laplace",
+    "student_t3": "Student-t (df 3)",
+    "lognormal": "Log-normal",
+    "uniform": "Uniform",
+    "gmm3": "GMM3",
+    "gmm5_unbalanced": "GMM5 Unbalanced",
+    "bimodal_asym": "Bimodal Asymmetric",
+    "gpt2_c_attn": "GPT-2 Attention Weights",
+    "s_set_k15": "S-Set (K=15)",
+    "a_set_k20": "A-Set (K=20)",
+    "unbalance": "Unbalance",
+    "birch_grid10x10": "Birch Grid (10x10)",
+    "dim32": "DIM-32",
+    "iris": "Iris",
+    "wine": "Wine",
+    "breast_cancer": "Breast Cancer",
+    "digits": "Digits",
+}
+
+#: Words that stay lowercase inside a title unless they lead it.
+_MINOR = {"a", "an", "and", "as", "at", "but", "by", "for", "in", "of", "on",
+          "or", "the", "to", "vs", "with"}
+
+
+def save_figure(fig, path, formats=("png", "pdf")):
+    """Write one figure in every requested format, from a single `.png` path.
+
+    PNG for looking at, PDF for the report: LaTeX embeds vector text and lines
+    at the printer's resolution, so axis labels stay sharp instead of being
+    resampled from a 140-dpi bitmap.
+
+    The dominated cloud is drawn with `rasterized=True`, which matters most
+    here: inside the PDF those ~12,000 points stay a raster while the axes,
+    text and front remain vector. Without it the file would carry twelve
+    thousand individual vector circles per figure.
+    """
+    path = Path(path)
+    for ext in formats:
+        fig.savefig(path.with_suffix("." + ext), bbox_inches="tight")
+
+
+def pretty_name(name: str) -> str:
+    """Dataset name as a figure title: title case, with the known names spelled out.
+
+    Falls back to title-casing the identifier for anything not in
+    `DISPLAY_NAMES` -- underscores become spaces, each word takes an initial
+    capital, and minor words keep lowercase unless they lead. A token already
+    carrying capitals (an acronym someone typed deliberately) is left alone
+    rather than being flattened to Title Case.
+    """
+    if not name:
+        return name
+    if name in DISPLAY_NAMES:
+        return DISPLAY_NAMES[name]
+    words = name.replace("_", " ").split()
+    out = []
+    for i, w in enumerate(words):
+        if w != w.lower():
+            out.append(w)                       # respect a deliberate acronym
+        elif i and w in _MINOR:
+            out.append(w)
+        else:
+            out.append(w[:1].upper() + w[1:])
+    return " ".join(out)
 
 
 def objective_matrix(rows, objectives) -> np.ndarray:
@@ -50,16 +126,41 @@ def drop_degenerate(rows, objectives):
 
 
 def nondominated(f: np.ndarray) -> np.ndarray:
-    """Boolean mask of the Pareto-optimal rows of a minimization matrix."""
+    """Boolean mask of the Pareto-optimal rows of a minimization matrix.
+
+    Two objectives get a sweep: sort by the first, walk left to right, and keep
+    a point only if it beats the best second objective seen so far. That is
+    O(n log n) against the pairwise form's O(n^2), which matters once this is
+    applied to a 12,000-point evaluation archive rather than a 100-point front.
+
+    Exact duplicates are collapsed first and their fate shared. Without that the
+    strict comparison in the sweep would mark the second copy of an identical
+    pair as dominated, when by definition neither dominates the other -- a point
+    is dominated only if some other is at least as good everywhere and strictly
+    better somewhere.
+    """
     n = len(f)
-    keep = np.ones(n, dtype=bool)
-    for i in range(n):
-        if not keep[i]:
-            continue
-        dominated = np.all(f <= f[i], axis=1) & np.any(f < f[i], axis=1)
-        if dominated.any():
-            keep[i] = False
-    return keep
+    if n == 0:
+        return np.zeros(0, dtype=bool)
+    if f.shape[1] != 2:
+        keep = np.ones(n, dtype=bool)
+        for i in range(n):
+            if not keep[i]:
+                continue
+            dominated = np.all(f <= f[i], axis=1) & np.any(f < f[i], axis=1)
+            if dominated.any():
+                keep[i] = False
+        return keep
+
+    uniq, inverse = np.unique(f, axis=0, return_inverse=True)
+    order = np.lexsort((uniq[:, 1], uniq[:, 0]))
+    keep_u = np.zeros(len(uniq), dtype=bool)
+    best = np.inf
+    for i in order:
+        if uniq[i, 1] < best:
+            keep_u[i] = True
+            best = uniq[i, 1]
+    return keep_u[inverse.ravel()]
 
 
 def dominance_counts(a: np.ndarray, b: np.ndarray) -> tuple[int, int, int]:
@@ -90,7 +191,21 @@ def dominance_counts(a: np.ndarray, b: np.ndarray) -> tuple[int, int, int]:
 
 def hypervolume(f: np.ndarray, ideal: np.ndarray, nadir: np.ndarray,
                 ref: float = 1.1) -> float:
-    """Normalized hypervolume against a shared box. 0 when the front is empty."""
+    """Fraction of the reference box dominated by the front. In [0, 1].
+
+    The objectives are first mapped to the unit box using the ideal and nadir
+    of the two fronts' UNION, then the dominated volume is measured against a
+    reference point at `ref` on every axis.
+
+    That raw volume is then DIVIDED BY ref**m. Without it the measure runs to
+    ref**m, not 1: a front touching the ideal corner scored 1.21 on two
+    objectives, which is indefensible in a column labelled "coverage" and was
+    reported that way until it was queried. Worse, the ceiling moves with the
+    number of objectives -- 1.21 for two, 1.331 for three -- so an unnormalized
+    figure is not even comparable between two runs of this same benchmark that
+    optimize different objective counts. Dividing makes it a fraction of the
+    same box in every configuration.
+    """
     if len(f) == 0:
         return 0.0
     span = np.where(nadir - ideal > 0, nadir - ideal, 1.0)
@@ -100,9 +215,10 @@ def hypervolume(f: np.ndarray, ideal: np.ndarray, nadir: np.ndarray,
         return 0.0
     try:
         from pymoo.indicators.hv import HV
-        return float(HV(ref_point=np.full(f.shape[1], ref))(z))
+        raw = float(HV(ref_point=np.full(f.shape[1], ref))(z))
     except ImportError:                        # pragma: no cover
         return float("nan")
+    return raw / ref ** f.shape[1]
 
 
 def compare(front_rows, baseline_rows, objectives) -> dict:
@@ -124,7 +240,8 @@ def compare(front_rows, baseline_rows, objectives) -> dict:
     # width and every hypervolume comes out at the maximum, ref^n_obj, for
     # everyone -- which reads as a perfect tie rather than as "there was
     # nothing to compare". Flag it; the runner prints a warning.
-    degenerate = bool(len(fa) and len(ba_nd)) and         bool(np.all(nadir - ideal <= 1e-12))
+    degenerate = (bool(len(fa) and len(ba_nd))
+                  and bool(np.all(nadir - ideal <= 1e-12)))
 
     a_only, b_only, tied = dominance_counts(fa, ba_nd)
     return {
@@ -317,6 +434,7 @@ QUALITY_LEGEND = """\
         shown the true labels; this is scored afterwards."""
 
 REACH_LEGEND = """\
+  n / d         samples and dimensions of the dataset.
   runs / evals  how many clusterings each method actually produced: one k-means
                 run per cluster count per arm, one companding evaluation per
                 candidate genome.
@@ -327,8 +445,103 @@ REACH_LEGEND = """\
   only X        clusterings on X's front that the OTHER method never reaches at
                 any K.  Plain Pareto dominance -- no scaling, nothing to tune,
                 and the claim that survives the most scrutiny.
-  coverage      hypervolume of each front, both normalized against the ideal and
-                nadir of their union so they share one box.  HIGHER is better."""
+  coverage      fraction of the reference box each front dominates, in [0,1].
+                Both fronts are normalized against the ideal and nadir of their
+                union, so it is a share of the SAME box.  HIGHER is better."""
+
+
+ARM_LABEL = {"dp": "K-means (DP)", "lloyd": "K-means (Lloyd x10)",
+             "sklearn": "K-means (scikit-learn)", "companding": "Companding (NSGA-II)"}
+ARM_ORDER = ("dp", "lloyd", "sklearn", "companding")
+
+
+def method_rows(summary) -> list[dict]:
+    """One row per METHOD, not one row per dataset.
+
+    The three k-means arms are different algorithms with different guarantees --
+    the DP is a proven optimum, Lloyd is a restarted local search, sklearn is an
+    independent implementation -- and collapsing them into a single best-of-three
+    column answers only "what is the best k-means anyone would get". It cannot
+    answer "how does this compare to Lloyd", which is the question a reader with
+    Lloyd in their pipeline actually has. So each arm gets its own row.
+    """
+    arms = summary.get("kmeans_arms") or {}
+    per_arm = summary.get("per_arm") or {}
+    out = []
+    for arm in ARM_ORDER:
+        if arm == "companding":
+            out.append({
+                "method": ARM_LABEL[arm], "arm": arm,
+                "runs": summary.get("n_companding_evals"),
+                "mse": summary.get("best_mse_companding"),
+                "mse_k": summary.get("best_mse_k_companding"),
+                "db": summary.get("best_db_companding"),
+                "db_k": summary.get("best_db_k_companding"),
+                "db_min": summary.get("best_db_minsize_companding"),
+                "silhouette": summary.get("best_silhouette_companding"),
+                "silhouette_k": summary.get("best_silhouette_k_companding"),
+                "ari": summary.get("best_adjusted_rand_companding"),
+                "ari_k": summary.get("best_adjusted_rand_k_companding"),
+                "cost": None, "shared_k": None, "front": summary.get("n_front_companding"),
+            })
+            continue
+        a = arms.get(arm)
+        if not a:
+            continue
+        pa = per_arm.get(arm, {})
+        ex = [m["excess_pct"] for m in pa.get("matched_k", [])
+              if np.isfinite(m["excess_pct"])]
+        out.append({
+            "method": ARM_LABEL[arm], "arm": arm, "runs": a.get("n_runs"),
+            "mse": a.get("best_mse"), "mse_k": a.get("best_mse_k"),
+            "db": a.get("best_db"), "db_k": a.get("best_db_k"), "db_min": None,
+            "silhouette": a.get("best_silhouette"),
+            "silhouette_k": a.get("best_silhouette_k"),
+            "ari": a.get("best_adjusted_rand"),
+            "ari_k": a.get("best_adjusted_rand_k"),
+            # Excess is the COMPANDING cost measured against THIS arm alone.
+            "cost": float(np.median(ex)) if ex else None,
+            "shared_k": len(ex),
+            "front": pa.get("n_front_kmeans"),
+        })
+    return out
+
+
+PER_ARM_LEGEND = """  Each k-means arm is listed separately; they are different algorithms.
+    DP            globally optimal 1-D k-means by dynamic programming.
+                  A proven optimum, and 1-D only.
+    Lloyd x10     best of ten restarts (k-means++/random/quantile/uniform).
+    scikit-learn  independent implementation, same K grid as the others.
+  runs      clusterings that method produced (one per K for k-means arms).
+  cost@K    excess MSE COMPANDING pays against THAT ARM at equal cluster count,
+            median over the K they share. Blank on the companding row itself.
+  @K        cluster count the score was achieved at; min= its smallest cluster.
+  ARI       adjusted Rand index vs. the generating labels, where they exist.
+            The only column a badly shaped partition cannot fake."""
+
+
+def format_per_arm_tables(summaries, markdown=False) -> str:
+    """The main table: every dataset, every method, one row each."""
+    head = ["dataset", "method", "runs", "best MSE", "cost@K", "shared K",
+            "best DB", "best silh", "best ARI"]
+    rows = []
+    for s in summaries:
+        first = True
+        for m in method_rows(s):
+            rows.append([
+                f"{s['dataset']} (n={s['n']}, d={s['d']})" if first else "",
+                m["method"], _fmt(m["runs"], "{:d}"),
+                _with_k(m["mse"], m["mse_k"], "{:.4g}"),
+                _fmt(m["cost"], "{:+.1f}%"), _fmt(m["shared_k"], "{:d}"),
+                _with_k(m["db"], m["db_k"], "{:.3f}", m["db_min"]),
+                _with_k(m["silhouette"], m["silhouette_k"], "{:+.3f}"),
+                _with_k(m["ari"], m["ari_k"], "{:.3f}"),
+            ])
+            first = False
+    h = "### " if markdown else ""
+    parts = [f"{h}Every method, separately", "",
+             _render(head, rows, markdown), "", PER_ARM_LEGEND]
+    return "\n".join(parts)
 
 
 def format_suite_tables(summaries, markdown=False) -> str:
@@ -361,10 +574,13 @@ def format_suite_tables(summaries, markdown=False) -> str:
                         "{:.3f}")]
                for r in rows]
 
-    reach_head = ["dataset", "k-means runs", "on its front",
+    # n and d repeat here rather than being left to the first table: each table
+    # gets read on its own, and "only companding 81" means something different
+    # at n=150, d=4 than at n=10000, d=2.
+    reach_head = ["dataset", "n", "d", "k-means runs", "on its front",
                   "companding evals", "on its front", "only companding",
                   "only k-means", "coverage companding", "coverage k-means"]
-    reach = [[r["dataset"], _fmt(r["kmeans_runs"], "{:d}"),
+    reach = [[r["dataset"], r["n"], r["d"], _fmt(r["kmeans_runs"], "{:d}"),
               r["front_points_kmeans"], _fmt(r["companding_evals"], "{:d}"),
               r["front_points_companding"], r["only_companding"],
               r["only_kmeans"], _fmt(r["hv_companding"], "{:.3f}"),
@@ -385,20 +601,35 @@ def format_suite_tables(summaries, markdown=False) -> str:
 # figures
 # --------------------------------------------------------------------------
 
+#: Axis labels. Every searchable objective in `metrics.MINIMIZED` is minimized,
+#: so each carries a down arrow rather than a parenthetical: the arrow is read
+#: at a glance next to the axis, whereas "(lower better)" is prose competing
+#: with the tick labels for the same space. Anything shown with an up arrow is
+#: a quantity where more is better -- there are none on the objective axes by
+#: construction, but the convergence plot's hypervolume is one.
 _LABEL = {
-    "mse": "MSE (distortion)",
-    "sse": "SSE (distortion)",
-    "davies_bouldin": "Davies-Bouldin (lower better)",
-    "neg_silhouette": "-silhouette (lower better)",
-    "k_eff": "clusters used",
-    "entropy_bits": "label entropy (bits/sample)",
-    "index_bits": "index width (bits)",
+    "mse": "MSE ↓",
+    "sse": "SSE ↓",
+    "davies_bouldin": "Davies-Bouldin ↓",
+    "neg_silhouette": "−silhouette ↓",
+    "k_eff": "clusters used ↓",
+    "entropy_bits": "label entropy, bits/sample ↓",
+    "index_bits": "index width, bits ↓",
 }
 
 
 def plot_objective_space(path, dataset_name, front_rows, baseline_rows,
-                         objectives):
-    """The headline figure: both fronts on the two axes that were optimized."""
+                         objectives, archive_rows=None, arms=None):
+    """The headline figure: both fronts on the two axes that were optimized.
+
+    `archive_rows` is every candidate the search EVALUATED, drawn as a faint
+    cloud behind the front. It has to be passed in explicitly: pymoo's `res.X`
+    is already reduced to the non-dominated set, so a "dominated" series derived
+    from it is empty by construction -- which is exactly what this figure showed
+    for several runs, legend entry and all, until someone noticed the points
+    were missing. The cloud is the honest picture of what the search explored
+    and how much of it the front summarises.
+    """
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -408,32 +639,70 @@ def plot_objective_space(path, dataset_name, front_rows, baseline_rows,
     fa, ba = objective_matrix(fr, objectives), objective_matrix(br, objectives)
 
     fig, ax = plt.subplots(figsize=(6.4, 4.6), dpi=140)
-    styles = {"kmeans_dp": ("o", "#1b7837", "k-means (exact DP)"),
-              "kmeans_lloyd": ("s", "#2166ac", "k-means (Lloyd, multi-start)"),
-              "kmeans_sklearn": ("^", "#7fbf7b", "k-means (scikit-learn)")}
+
+    # Draw order is explicit, not incidental. The dominated cloud is thousands
+    # of points and the k-means arms are a few dozen, so whichever is drawn
+    # last wins the pixels -- with the cloud on top the baselines disappeared
+    # under it. zorder rather than call order, so a later edit that reorders
+    # these blocks cannot silently bury the baselines again.
+    Z_CLOUD, Z_KMEANS, Z_FRONT = 1, 3, 4
+
+    if archive_rows:
+        ar = objective_matrix(drop_degenerate(archive_rows, objectives), objectives)
+        if len(ar):
+            # Only the DOMINATED ones. The archive also holds the survivors, and
+            # drawing those under a "dominated" label would be wrong -- the
+            # front is plotted separately, in its own colour.
+            dom = ar[~nondominated(ar)]
+            if len(dom):
+                ax.plot(dom[:, 0], dom[:, 1], ".", ms=2, color="#A6DBA0",
+                        alpha=0.35, ls="none", rasterized=True,
+                        zorder=Z_CLOUD,
+                        label="Companding dominated (NSGA-II)")
+
+    # Blue / orange / red for the three k-means arms; companding takes green,
+    # its dominated cloud a pale tint of the same green so the two read as one
+    # method at a glance.
+    #
+    # Red and green together are the pair most affected by deuteranopia, so the
+    # figure is built not to depend on hue: every arm has its own marker
+    # (circle, square, triangle) and companding is the only series drawn as a
+    # connected line. Colour is the fast path, shape is the reliable one.
+    #
+    # Semi-transparent because the arms overlap heavily wherever they agree,
+    # and that overlap is itself informative: solid markers hid whichever was
+    # drawn last.
+    styles = {"kmeans_dp": ("o", "#0072B2", "K-means (DP)"),
+              "kmeans_lloyd": ("s", "#E69F00", "K-means (Lloyd, multi-start)"),
+              "kmeans_sklearn": ("^", "#B2182B", "K-means (scikit-learn)")}
+    if arms:
+        styles = {f"kmeans_{a}": styles[f"kmeans_{a}"] for a in arms
+                  if f"kmeans_{a}" in styles}
+        if len(styles) == 1:
+            # Nothing to distinguish it from, so drop the qualifier.
+            k, (m, c, _) = next(iter(styles.items()))
+            styles = {k: (m, c, "K-means")}
     for method, (marker, colour, label) in styles.items():
         idx = [i for i, r in enumerate(br) if r["method"] == method]
         if idx:
-            ax.plot(ba[idx, 0], ba[idx, 1], marker, ms=5, color=colour,
-                    label=label, alpha=0.85, ls="none")
+            ax.plot(ba[idx, 0], ba[idx, 1], marker, ms=5.5, color=colour,
+                    label=label, alpha=0.6, ls="none", zorder=Z_KMEANS)
     if len(fa):
         nd = nondominated(fa)
-        ax.plot(fa[~nd, 0], fa[~nd, 1], ".", ms=3, color="#d6a0c0", alpha=0.5,
-                ls="none", label="companding (dominated)")
         pts = fa[nd]
         pts = pts[np.argsort(pts[:, 0])]
-        ax.plot(pts[:, 0], pts[:, 1], "-o", ms=4, lw=1.4, color="#b2182b",
-                label="companding front (NSGA-II)")
+        ax.plot(pts[:, 0], pts[:, 1], "-o", ms=4, lw=1.6, color="#1B7837",
+                zorder=Z_FRONT, label="Companding front (NSGA-II)")
 
     if objectives[0] in ("mse", "sse"):
         ax.set_xscale("log")
     ax.set_xlabel(_LABEL.get(objectives[0], objectives[0]))
     ax.set_ylabel(_LABEL.get(objectives[1], objectives[1]))
-    ax.set_title(f"{dataset_name}: companding vs. k-means")
+    ax.set_title(pretty_name(dataset_name))
     ax.grid(alpha=0.25, lw=0.5)
     ax.legend(fontsize=7, framealpha=0.9)
     fig.tight_layout()
-    fig.savefig(path)
+    save_figure(fig, path)
     plt.close(fig)
 
 
@@ -444,24 +713,29 @@ def plot_convergence(path, dataset_name, curve):
 
     fig, ax = plt.subplots(figsize=(5.6, 3.6), dpi=140)
     ax.plot([c["n_eval"] for c in curve], [c["hv"] for c in curve],
-            lw=1.6, color="#b2182b")
-    ax.set_xlabel("fitness evaluations")
-    ax.set_ylabel("hypervolume (shared box)")
-    ax.set_title(f"{dataset_name}: NSGA-II convergence")
+            lw=1.6, color="#1B7837")
+    ax.set_xlabel("Fitness evaluations")
+    ax.set_ylabel("Hypervolume")
+    ax.set_ylim(0, 1)
+    ax.set_title(pretty_name(dataset_name))
     ax.grid(alpha=0.25, lw=0.5)
     fig.tight_layout()
-    fig.savefig(path)
+    save_figure(fig, path)
     plt.close(fig)
 
 
-def plot_warp_1d(path, dataset, problem, x_best, kmeans_centroids=None):
-    """What the search actually learned: the warp, and where it puts its edges.
+def plot_warp_1d(path, dataset, genes, centroids, kmeans_centroids=None,
+                 grid_n=256, residual_type="linear", degree=3):
+    """What the search learned: the density with both methods' centroids, and
+    the monotone warp that produced them.
 
-    Three panels, because the interesting claim is geometric rather than
-    numeric -- the data density, the monotone map the search chose, and the
-    resulting decision boundaries next to k-means'. A companding front that
-    ties k-means on the metrics but reproduces its boundaries is a different
-    story from one that gets there another way.
+    Two panels, not three. The old third panel was a bare rug of centroid
+    positions, which is the same information as marking them on the density --
+    and far less useful there, because the whole question is WHERE the levels
+    sit relative to the mass.
+
+    Takes decoded genes rather than a problem object, so a finished run can be
+    redrawn from `front.csv` without reconstructing the search.
     """
     import matplotlib
     matplotlib.use("Agg")
@@ -469,46 +743,78 @@ def plot_warp_1d(path, dataset, problem, x_best, kmeans_centroids=None):
 
     from .companding import companding_forward
 
-    x = dataset.x[:, 0]
-    st = problem.genome.decode(x_best)
-    spec = problem.genome.spec
-    grid = np.linspace(x.min(), x.max(), 1000)
-    f = companding_forward(grid, float(st.alphas[0]), float(st.gammas[0]),
-                           st.us[0], spec.grid, spec.residual_type,
-                           spec.ispline_degree)
-    labels, cent = problem.partition(x_best)
+    k, alpha, gamma, u = genes
+    alpha, gamma = float(alpha[0]), float(gamma[0])
+    x = np.asarray(dataset.x)[:, 0]
+    # Evaluate F at the DATA, not on a uniform grid. `companding_forward`
+    # estimates its density histogram from whatever array it is handed, so
+    # passing a grid fits the warp to a UNIFORM density and draws a curve the
+    # quantizer never used -- which is why this panel showed a near-straight
+    # line for Laplace at gamma=0.294. It is the same trap `companding_edges`
+    # documents, and it survived here until the boundary markers were added
+    # and visibly failed to sit on the curve.
+    order = np.argsort(x)
+    grid = x[order]
+    f = companding_forward(x, alpha, gamma, np.asarray(u[0]), grid_n,
+                           residual_type, degree)[order]
+    cent = np.sort(np.asarray(centroids)[:, 0])
 
-    fig, axes = plt.subplots(3, 1, figsize=(6.4, 6.6), dpi=140, sharex=True)
-    axes[0].hist(x, bins=200, color="#4d4d4d", alpha=0.8)
-    axes[0].set_ylabel("count")
-    axes[0].set_title(f"{dataset.name}: density, learned warp, decision boundaries")
+    fig, axes = plt.subplots(2, 1, figsize=(6.4, 5.0), dpi=140, sharex=True)
 
-    axes[1].plot(grid, f, lw=1.6, color="#b2182b")
-    axes[1].set_ylabel("F(x)")
+    counts, _, _ = axes[0].hist(x, bins=200, color="#B0B0B0")
+    top = counts.max() if len(counts) else 1.0
+    # Centroids ON the density: a level sitting where there is no mass, or a
+    # gap where there is plenty, is the entire story of a quantizer and it is
+    # invisible when the marks live in a separate strip.
+    axes[0].vlines(cent, 0, top * 1.02, color="#1B7837", lw=0.9,
+                   label="Companding (NSGA-II)")
+    if kmeans_centroids is not None and len(kmeans_centroids):
+        axes[0].vlines(np.asarray(kmeans_centroids), 0, top * 0.62,
+                       color="#B2182B", lw=0.9, ls="--", label="K-means")
+    axes[0].set_ylabel("Count")
+    axes[0].set_ylim(0, top * 1.25)
+    axes[0].legend(fontsize=7, loc="upper right", ncol=2, framealpha=0.95)
+    axes[0].set_title(pretty_name(dataset.name))
+
+    axes[1].plot(grid, f, lw=1.6, color="#1B7837")
+    axes[1].set_ylabel("$F(x)$")
+
+    # The bin boundaries, marked where they are DECIDED. Assignment is
+    # floor(K F(x)), so bin j opens where the curve crosses j/K: the levels are
+    # equally spaced up the F axis and unequally spaced along x, and the warp
+    # is exactly the function that converts one into the other. Without these
+    # the panel shows a curve with no visible connection to the partition
+    # above it.
+    from .companding import companding_edges
+    edges = companding_edges(x, int(k[0]), alpha, gamma, np.asarray(u[0]),
+                             residual_type, degree)
+    if len(edges):
+        targets = (np.arange(1, int(k[0])) / int(k[0]))[:len(edges)]
+        step = max(1, len(edges) // 40)          # keep a large K readable
+        e, t = edges[::step], targets[::step]
+        axes[1].hlines(t, grid[0], e, color="#999999", lw=0.5, ls=":")
+        axes[1].vlines(e, 0, t, color="#999999", lw=0.5, ls=":")
+        axes[1].plot(e, t, "o", ms=3.5, color="#1B7837",
+                     label="bin boundaries")
+        axes[1].legend(fontsize=7, loc="lower right", framealpha=0.95)
+        # And on the density above, so the two panels line up visually.
+        axes[0].vlines(e, 0, top * 1.02, color="#999999", lw=0.5, ls=":",
+                       zorder=0)
     # F reaches 0 and 1 only at the clip window, which sits outside the data
     # range whenever the search picks a generous alpha -- so the curve looks
-    # like it fails to span [0,1] unless the window is drawn. Marking it also
-    # makes the one gene with a geometric meaning visible in the figure.
+    # like it fails to span [0,1] unless the window is drawn.
     mu, sd = x.mean(), x.std()
-    for edge in (mu - st.alphas[0] * sd, mu + st.alphas[0] * sd):
+    for edge in (mu - alpha * sd, mu + alpha * sd):
         if grid[0] <= edge <= grid[-1]:
             axes[1].axvline(edge, color="#666666", lw=0.8, ls=":")
-    axes[1].text(0.02, 0.86, f"K={int(st.ks[0])}  alpha={st.alphas[0]:.2f} "
-                             f"(clip at {mu - st.alphas[0] * sd:.2f}, "
-                             f"{mu + st.alphas[0] * sd:.2f})  "
-                             f"gamma={st.gammas[0]:.3f}  K_eff={len(cent)}",
-                 transform=axes[1].transAxes, fontsize=7.5)
-
-    order = np.argsort(cent[:, 0])
-    c = cent[order, 0]
-    axes[2].vlines(c, 0, 1, color="#b2182b", lw=1.0, label="companding centroids")
-    if kmeans_centroids is not None and len(kmeans_centroids):
-        axes[2].vlines(np.asarray(kmeans_centroids), 0, 0.6, color="#1b7837",
-                       lw=1.0, ls="--", label="k-means centroids")
-    axes[2].set_yticks([])
-    axes[2].set_ylim(0, 1.35)     # headroom so the legend cannot sit on the rules
-    axes[2].set_xlabel("x")
-    axes[2].legend(fontsize=7, loc="upper right", ncol=2, framealpha=0.95)
+    axes[1].text(0.02, 0.88,
+                 # Raw: in a plain f-string "\a" is the BEL character, so
+                 # "$\alpha$" reaches mathtext as "$<BEL>lpha$" and fails to
+                 # parse. Same trap for "\gamma" via no escape at all.
+                 rf"$K$={int(k[0])}   $\alpha$={alpha:.2f}   "
+                 rf"$\gamma$={gamma:.3f}   $K_{{\mathrm{{eff}}}}$={len(cent)}",
+                 transform=axes[1].transAxes, fontsize=8)
+    axes[1].set_xlabel("$x$")
     fig.tight_layout()
-    fig.savefig(path)
+    save_figure(fig, path)
     plt.close(fig)

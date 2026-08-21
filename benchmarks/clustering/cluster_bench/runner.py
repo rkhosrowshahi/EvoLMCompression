@@ -107,18 +107,32 @@ def run_dataset(name: str, cfg: Config, out_dir: Path, verbose: bool = True) -> 
     if verbose:
         print(f"    baselines at {len(ks)} K values "
               f"[{min(ks)}..{max(ks)}], arms {list(b.arms)} "
-              f"(sklearn on the {len(ladder)}-rung ladder only)")
+              + (f" (sklearn on the {len(ladder)}-rung ladder only)"
+                 if b.sklearn_ladder_only else ""))
     base_rows, notes = run_baselines(
         dataset, sorted(ks), b.arms, b.lloyd_n_init, b.sklearn_n_init,
         b.dp_max_n, cfg.silhouette_max_n, cfg.seed, verbose=False,
-        sklearn_k=ladder)
+        sklearn_k=ladder if b.sklearn_ladder_only else None)
     for note in notes:
         if verbose:
             print(f"    note: {note}")
 
+    archive = front_rows + _archive_best(problem)
     comp = report.compare(front_rows, base_rows, cfg.objectives)
-    matched = report.matched_k_table(front_rows + _archive_best(problem),
-                                     best_per_k(base_rows), "mse")
+    matched = report.matched_k_table(archive, best_per_k(base_rows), "mse")
+    # The same comparison repeated against each arm ON ITS OWN. Pooling the
+    # arms answers "can companding beat the best k-means anyone would get",
+    # which is one fair question; it cannot answer "how does companding compare
+    # to Lloyd", which is the question a reader with Lloyd in their pipeline
+    # actually has. Both are now reported, and they disagree.
+    per_arm = {}
+    for arm in sorted({str(r["method"]).replace("kmeans_", "") for r in base_rows}):
+        rows_a = [r for r in base_rows if str(r["method"]).endswith(arm)]
+        per_arm[arm] = {
+            **report.compare(front_rows, rows_a, cfg.objectives),
+            "matched_k": report.matched_k_table(archive, best_per_k(rows_a), "mse"),
+            "n_runs": len(rows_a),
+        }
     curve = report.convergence(res["snapshots"], cfg.objectives,
                                comp["ideal"], comp["nadir"])
 
@@ -128,11 +142,16 @@ def run_dataset(name: str, cfg: Config, out_dir: Path, verbose: bool = True) -> 
     _write_csv(dd / "baselines.csv", base_rows)
     _write_csv(dd / "matched_k.csv", matched)
     _write_csv(dd / "convergence.csv", curve)
+    # The whole evaluated population, objectives only. Kept because a figure
+    # cannot be redrawn from a front alone -- the front is what SURVIVED, and
+    # showing only survivors makes a search look tidier than it was.
+    _write_csv(dd / "archive.csv", _archive_rows(problem, cfg.objectives))
 
     if cfg.figures:
         try:
             report.plot_objective_space(dd / "objective_space.png", dataset.name,
-                                        front_rows, base_rows, cfg.objectives)
+                                        front_rows, base_rows, cfg.objectives,
+                                        _archive_rows(problem, cfg.objectives))
             report.plot_convergence(dd / "convergence.png", dataset.name, curve)
             if dataset.d == 1 and len(res["X"]):
                 # Draw the median-K front member rather than an extreme one:
@@ -143,8 +162,12 @@ def run_dataset(name: str, cfg: Config, out_dir: Path, verbose: bool = True) -> 
                 pick = int(np.argsort(keff)[len(keff) // 2])
                 kb = int(front_rows[pick]["k_eff"])
                 ref = _kmeans_centroids_1d(dataset, kb, b.dp_max_n, cfg.seed)
-                report.plot_warp_1d(dd / "warp.png", dataset, problem,
-                                    res["X"][pick], ref)
+                st = genome.decode(res["X"][pick])
+                _, cent = problem.partition(res["X"][pick])
+                report.plot_warp_1d(
+                    dd / "warp.png", dataset,
+                    (st.ks, st.alphas, st.gammas, st.us), cent, ref,
+                    spec.grid, spec.residual_type, spec.ispline_degree)
         except Exception as exc:                      # pragma: no cover
             print(f"    figures failed: {type(exc).__name__}: {exc}")
 
@@ -165,6 +188,7 @@ def run_dataset(name: str, cfg: Config, out_dir: Path, verbose: bool = True) -> 
         # numbers at K=200, and the K is the first thing anyone asks.
         **_best_with_k(front_rows, base_rows),
         "matched_k": matched,
+        "per_arm": per_arm,
         "total_seconds": round(time.perf_counter() - t0, 2),
     }
     (dd / "summary.json").write_text(json.dumps(summary, indent=2, default=float))
@@ -182,11 +206,16 @@ def _extreme(rows, key, best=min):
     """
     usable = [r for r in rows if np.isfinite(r.get(key, np.nan))]
     if not usable:
-        return None, None, None
+        return None, None, None, None
     pick = best(usable, key=lambda r: r[key])
     small = pick.get("min_cluster_size")
+    # Which arm produced it. The k-means column is a best-of-three ENVELOPE
+    # recomputed per measure, not one algorithm -- in 1-D the MSE entry is
+    # always the exact DP, but the validity entries are sometimes Lloyd or
+    # scikit-learn. A reader cannot check the claim without knowing which.
     return (float(pick[key]), int(pick["k_eff"]),
-            int(small) if small is not None else None)
+            int(small) if small is not None else None,
+            str(pick.get("method", "")).replace("kmeans_", "") or None)
 
 
 def _best_with_k(front_rows, base_rows) -> dict:
@@ -199,10 +228,68 @@ def _best_with_k(front_rows, base_rows) -> dict:
                                # Reported last but read first: the only measure
                                # here that a badly shaped partition cannot fake.
                                ("adjusted_rand", "adjusted_rand", max)):
-            v, k, small = _extreme(rows, key, how)
+            v, k, small, arm = _extreme(rows, key, how)
             out[f"best_{name}_{label}"] = v
             out[f"best_{name}_k_{label}"] = k
             out[f"best_{name}_minsize_{label}"] = small
+            if label == "kmeans":
+                out[f"best_{name}_arm_kmeans"] = arm
+    out["kmeans_arms"] = _arm_breakdown(base_rows)
+    return out
+
+
+def _archive_rows(problem, objectives) -> list[dict]:
+    """Every evaluated candidate, reduced to what a plot or a table needs.
+
+    Only feasible candidates are kept -- those satisfying the same cluster-count
+    constraints the search enforced. The infeasible ones are dominated by
+    construction on both axes (an all-singletons partition scores MSE 0 and
+    Davies-Bouldin 0) and drawing them would put a dense cloud in the ideal
+    corner that no legal solution can reach.
+    """
+    keep = ("mse", "sse", "davies_bouldin", "neg_silhouette", "k_eff",
+            "entropy_bits", "index_bits", "min_cluster_size")
+    lo = problem.min_k_eff or 2
+    hi = problem.max_k_eff or float("inf")
+    out = []
+    for r in problem.history:
+        if not (lo <= r["k_eff"] <= hi):
+            continue
+        if r.get("min_cluster_size", 1) < problem.min_cluster_size:
+            continue
+        out.append({"eval": r["eval"],
+                    **{k: r[k] for k in keep if k in r}})
+    return out
+
+
+def _arm_breakdown(base_rows) -> dict:
+    """Per-arm bests, so the envelope can always be taken apart again.
+
+    Note the arms are NOT equally sampled: `sklearn` is fitted only on the
+    configured K ladder while `dp` and `lloyd` also run at every K the
+    companding front reached, so its "best over K" is drawn from a coarser
+    grid. It is an independent-implementation check, not a third competitor,
+    and `n_runs` here is what makes that visible rather than implied.
+    """
+    out: dict[str, dict] = {}
+    for r in base_rows:
+        arm = str(r.get("method", "")).replace("kmeans_", "")
+        cur = out.setdefault(arm, {"n_runs": 0, "k_min": None, "k_max": None})
+        cur["n_runs"] += 1
+        k = int(r["k_eff"])
+        cur["k_min"] = k if cur["k_min"] is None else min(cur["k_min"], k)
+        cur["k_max"] = k if cur["k_max"] is None else max(cur["k_max"], k)
+        for name, key, how in (("mse", "mse", min),
+                               ("db", "davies_bouldin", min),
+                               ("silhouette", "silhouette", max),
+                               ("adjusted_rand", "adjusted_rand", max)):
+            v = r.get(key)
+            if v is None or not np.isfinite(v):
+                continue
+            prev = cur.get(f"best_{name}")
+            if prev is None or how(float(v), prev) == float(v):
+                cur[f"best_{name}"] = float(v)
+                cur[f"best_{name}_k"] = k
     return out
 
 
@@ -285,5 +372,7 @@ def _write_suite_table(out_dir: Path, summaries):
     (out_dir / "suite.json").write_text(
         json.dumps(summaries, indent=2, default=float))
     if rows:
+        print()
+        print(report.format_per_arm_tables(summaries))
         print()
         print(report.format_suite_tables(summaries))
