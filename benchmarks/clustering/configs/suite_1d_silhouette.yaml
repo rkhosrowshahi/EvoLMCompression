@@ -1,0 +1,33 @@
+# Same problems as suite_1d.yaml, one line different: the validity axis is the
+# silhouette rather than Davies-Bouldin.
+#
+# Worth running because the two indices disagree about what a good partition
+# is. DB is a centroid-and-spread statistic, cheap and O(K^2); the silhouette
+# is a per-point statistic that notices whether a point is closer to its own
+# cluster than to the next one, and it is O(n^2) -- so this config is
+# materially slower, and `silhouette_max_n` is what buys it back. If a
+# companding win on DB does not survive the switch to silhouette, it was a
+# statement about DB.
+name: suite_1d_silhouette
+seed: 0
+datasets: [suite_1d]
+objectives: [mse, neg_silhouette]
+silhouette_max_n: 1500
+figures: true
+
+search:
+  pop_size: 100
+  n_gen: 120
+  log_every: 20
+
+genome:
+  k_min: 2
+  k_max: 256
+  alpha_max: 12.0
+  gamma_max: 1.5
+  residual_genes: 6
+
+baselines:
+  arms: [dp, lloyd, sklearn]
+  k_max: 256
+  k_steps: 10

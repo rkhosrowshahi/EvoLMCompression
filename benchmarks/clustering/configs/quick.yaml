@@ -1,0 +1,26 @@
+# Smallest run that exercises every arm end to end: two 1-D problems, two
+# multi-D, tiny budgets. Minutes, not hours -- use it to check wiring, not to
+# draw conclusions.
+name: quick
+seed: 0
+datasets: [gmm3, laplace, unbalance, iris]
+objectives: [mse, davies_bouldin]
+silhouette_max_n: 1000
+figures: true
+
+search:
+  pop_size: 40
+  n_gen: 25
+  log_every: 5
+
+genome:
+  k_max: 64
+  residual_genes: 6
+  share_warp: true
+
+baselines:
+  arms: [dp, lloyd, sklearn]
+  k_max: 64
+  k_steps: 6
+  lloyd_n_init: 6
+  dp_max_n: 2000

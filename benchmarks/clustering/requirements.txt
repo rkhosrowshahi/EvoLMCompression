@@ -1,0 +1,14 @@
+# Benchmark-only dependencies. Deliberately disjoint from the parent project's
+# requirements.txt -- nothing here imports evolmc, and there is no torch and no
+# transformers: the whole thing is numpy.
+numpy>=1.24
+pymoo>=0.6.1        # NSGA-II and the hypervolume indicator
+pyyaml>=6.0
+matplotlib>=3.7     # figures
+
+# One of the three k-means arms, and the loader for the real datasets (iris,
+# wine, breast_cancer, digits). Optional: without it those arms and datasets
+# are skipped with a printed note, and the synthetic suites still run in full.
+scikit-learn>=1.3
+
+pytest>=7.0

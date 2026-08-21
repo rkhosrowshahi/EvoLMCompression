@@ -1,0 +1,55 @@
+# The secondary result: per-dimension companding as a product quantizer, on the
+# standard multi-dimensional clustering benchmarks.
+#
+# Read this as a limitations study, not as a horse race. k-means places free
+# centroids anywhere in R^d; a separable compander places an axis-aligned
+# non-uniform grid and keeps the occupied cells. On SSE it should lose, and by
+# how much -- and on which shapes -- is the actual finding. birch_grid is the
+# control: its structure IS product-shaped, so if companding cannot compete
+# there it cannot compete anywhere in multi-D.
+#
+# NOTE ON K: the occupied-cell count is not bounded by k_max. With share_warp
+# and k_max=32 on a 2-D set, 32x32 = 1024 cells can leave several hundred
+# occupied, so K_eff routinely lands far above anything the genome names. That
+# is why baselines.match_k_cap exists.
+name: suite_md
+seed: 0
+datasets: [suite_md]
+objectives: [mse, davies_bouldin]
+silhouette_max_n: 1500
+figures: true
+
+search:
+  pop_size: 100
+  n_gen: 120
+  log_every: 20
+  # Stated explicitly here rather than left to the default, because in multi-D
+  # this is the difference between a benchmark and a degenerate one. Without a
+  # ceiling the search finds the all-singletons partition -- MSE 0 and
+  # Davies-Bouldin 0, a perfect score on both axes that is not a clustering --
+  # and it dominates everything else from generation 1.
+  max_k_eff: 512
+
+genome:
+  k_min: 2
+  k_max: 32
+  alpha_min: 0.5
+  alpha_max: 8.0
+  gamma_min: 0.0
+  gamma_max: 1.5
+  residual_genes: 6
+  # One warp shared across dimensions, K free per dimension. Per-dimension
+  # warps on dim32 would be 32*(3+6) = 288 decision variables, which is well
+  # past the point where non-dominated sorting still gives NSGA-II useful
+  # selection pressure -- the same wall the parent project hits with per-layer
+  # encodings. Flip this to false for the 2-D sets if you want the ablation.
+  share_warp: true
+
+baselines:
+  arms: [dp, lloyd, sklearn]
+  k_min: 2
+  k_max: 128
+  k_steps: 8
+  lloyd_n_init: 10
+  sklearn_n_init: 10
+  match_k_cap: 512

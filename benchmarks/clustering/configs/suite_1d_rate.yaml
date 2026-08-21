@@ -1,0 +1,31 @@
+# The parent project's axes, on clustering data: distortion against RATE.
+#
+# suite_1d.yaml asks a clustering question (is the partition well separated?).
+# This asks the compression question the method was actually designed for: how
+# much distortion per bit of label entropy? The distinction matters for the
+# comparison, because k-means minimizes distortion at a fixed K and is
+# completely indifferent to how skewed the resulting label distribution is --
+# while a compander controls exactly that skew through gamma. If companding
+# ever beats k-means outright, this is the axis pair where it happens.
+name: suite_1d_rate
+seed: 0
+datasets: [suite_1d, gpt2_weights]
+objectives: [mse, entropy_bits]
+figures: true
+
+search:
+  pop_size: 100
+  n_gen: 120
+  log_every: 20
+
+genome:
+  k_min: 2
+  k_max: 256
+  gamma_max: 1.5
+  residual_genes: 6
+
+baselines:
+  arms: [dp, lloyd, sklearn]
+  k_max: 256
+  k_steps: 12
+  dp_max_n: 4000

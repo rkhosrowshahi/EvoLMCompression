@@ -1,0 +1,45 @@
+# The primary result: scalar companding against k-means on 1-D problems.
+#
+# 1-D is where the comparison is decidable. Exact k-means by dynamic
+# programming gives a globally optimal reference at every K, so "companding
+# costs x% distortion" is an absolute statement rather than a comparison
+# between two heuristics that both got stuck somewhere.
+name: suite_1d
+seed: 0
+datasets: [suite_1d]
+objectives: [mse, davies_bouldin]
+silhouette_max_n: 2000
+figures: true
+
+search:
+  pop_size: 100
+  n_gen: 120
+  log_every: 20
+
+genome:
+  k_min: 2
+  k_max: 256
+  # alpha up to 12 sigma so the search can effectively decline to clip; on the
+  # heavy-tailed problems (student_t3) that ceiling is the difference between
+  # a warp that sees the tail and one that throws it away.
+  alpha_min: 0.5
+  alpha_max: 12.0
+  # gamma past 1 on purpose: 1/3 is MSE-optimal and 1 is equiprobable, and the
+  # unbalanced mixtures are exactly where the search should want to go further
+  # than equiprobable to keep the rare modes resolved.
+  gamma_min: 0.0
+  gamma_max: 1.5
+  residual_genes: 6
+  residual_type: linear
+
+baselines:
+  arms: [dp, lloyd, sklearn]
+  k_min: 2
+  k_max: 256
+  k_steps: 10
+  lloyd_n_init: 10
+  sklearn_n_init: 10
+  # Must stay >= datasets.N_1D (4000), or the DP subsamples and the reference
+  # stops being a proven optimum -- which is the entire reason this suite is
+  # the primary result. The run prints which of the two happened.
+  dp_max_n: 4000
